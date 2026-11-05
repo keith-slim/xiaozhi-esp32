@@ -3,6 +3,7 @@
 
 #include <lvgl.h>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -19,7 +20,7 @@ struct JpegChunk {
 };
 
 class EspVideo : public Camera {
-private:
+protected:
     struct FrameBuffer {
         uint8_t* data = nullptr;
         size_t len = 0;
@@ -27,6 +28,10 @@ private:
         uint16_t height = 0;
         v4l2_pix_fmt_t format = 0;
     } frame_;
+    std::recursive_mutex capture_mutex_;
+    bool CaptureFrame(bool preview, int discard_frames);
+
+private:
     v4l2_pix_fmt_t sensor_format_ = 0;
 #ifdef CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
     uint16_t sensor_width_ = 0;

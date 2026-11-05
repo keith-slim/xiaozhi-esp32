@@ -1,4 +1,5 @@
 #include "application.h"
+#include <hal/hal.h>
 #include "assets.h"
 #include "assets/lang_config.h"
 #include "audio_codec.h"
@@ -467,6 +468,7 @@ void Application::CheckAssetsVersion() {
 void Application::CheckNewVersion() {
     const int MAX_RETRY = 10;
     int retry_count = 0;
+    int challenge_rounds = 0;
     int retry_delay = 10;  // Initial retry delay in seconds
 
     auto& board = Board::GetInstance();
@@ -524,15 +526,18 @@ void Application::CheckNewVersion() {
 
         // No new version, mark the current version as valid
         ota_->MarkCurrentVersionValid();
-        if (!ota_->HasActivationCode() && !ota_->HasActivationChallenge()) {
+        if (ota_->RequiresAppBinding()) {
+            GetHAL().requestAppSetup();
+        }
+        if (!ota_->HasActivationChallenge()) {
             // Exit the loop if done checking new version
             break;
         }
 
         display->SetStatus(Lang::Strings::ACTIVATION);
-        // Activation code is shown to the user and waiting for the user to input
-        if (ota_->HasActivationCode()) {
-            ShowActivationCode(ota_->GetActivationCode(), ota_->GetActivationMessage());
+        // Keep automatic device authentication bounded; manual binding uses the App.
+        if (++challenge_rounds > 3) {
+            GetHAL().requestAppSetup();
         }
 
         // This will block the loop until the activation is done or timeout
@@ -750,30 +755,6 @@ void Application::InitializeProtocol() {
     protocol_->Start();
 }
 
-void Application::ShowActivationCode(const std::string& code, const std::string& message) {
-    struct digit_sound {
-        char digit;
-        const std::string_view& sound;
-    };
-    static const std::array<digit_sound, 10> digit_sounds{
-        {digit_sound{'0', Lang::Sounds::OGG_0}, digit_sound{'1', Lang::Sounds::OGG_1},
-         digit_sound{'2', Lang::Sounds::OGG_2}, digit_sound{'3', Lang::Sounds::OGG_3},
-         digit_sound{'4', Lang::Sounds::OGG_4}, digit_sound{'5', Lang::Sounds::OGG_5},
-         digit_sound{'6', Lang::Sounds::OGG_6}, digit_sound{'7', Lang::Sounds::OGG_7},
-         digit_sound{'8', Lang::Sounds::OGG_8}, digit_sound{'9', Lang::Sounds::OGG_9}}};
-
-    // This sentence uses 9KB of SRAM, so we need to wait for it to finish
-    Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", Lang::Sounds::OGG_ACTIVATION);
-
-    for (const auto& digit : code) {
-        auto it = std::find_if(digit_sounds.begin(), digit_sounds.end(),
-                               [digit](const digit_sound& ds) { return ds.digit == digit; });
-        if (it != digit_sounds.end()) {
-            audio_service_.PlaySound(it->sound);
-        }
-    }
-}
-
 void Application::Alert(const char* status, const char* message, const char* emotion,
                         const std::string_view& sound) {
     ESP_LOGW(TAG, "Alert [%s] %s: %s", emotion, status, message);
@@ -858,6 +839,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
         if (!protocol_->OpenAudioChannel()) {
             // Return to idle so the device is not stuck in the connecting
             // state (not every failure path reports a network error)
+            board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
             SetDeviceState(kDeviceStateIdle);
             return;
         }
@@ -995,6 +977,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
             // Return to idle so the device is not stuck in the connecting
             // state (not every failure path reports a network error), and
             // wake word detection is re-enabled by the idle state handler.
+            board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
             SetDeviceState(kDeviceStateIdle);
             return;
         }

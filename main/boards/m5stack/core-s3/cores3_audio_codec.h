@@ -25,8 +25,9 @@ private:
 
 public:
     CoreS3AudioCodec(void* i2c_master_handle, int input_sample_rate, int output_sample_rate,
-        gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din,
-        uint8_t aw88298_addr, uint8_t es7210_addr, bool input_reference);
+                     gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout,
+                     gpio_num_t din, uint8_t aw88298_addr, uint8_t es7210_addr,
+                     bool input_reference, float input_gain = 30.0f);
     virtual ~CoreS3AudioCodec();
 
     virtual void SetOutputVolume(int volume) override;

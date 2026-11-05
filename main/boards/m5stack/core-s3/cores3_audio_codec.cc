@@ -1,20 +1,24 @@
 #include "cores3_audio_codec.h"
 
-#include <esp_log.h>
 #include <driver/i2c_master.h>
 #include <driver/i2s_tdm.h>
+#include <esp_log.h>
+#include <algorithm>
+#include <array>
 
 #define TAG "CoreS3AudioCodec"
 
-CoreS3AudioCodec::CoreS3AudioCodec(void* i2c_master_handle, int input_sample_rate, int output_sample_rate,
-    gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din,
-    uint8_t aw88298_addr, uint8_t es7210_addr, bool input_reference) {
+CoreS3AudioCodec::CoreS3AudioCodec(void* i2c_master_handle, int input_sample_rate,
+                                   int output_sample_rate, gpio_num_t mclk, gpio_num_t bclk,
+                                   gpio_num_t ws, gpio_num_t dout, gpio_num_t din,
+                                   uint8_t aw88298_addr, uint8_t es7210_addr, bool input_reference,
+                                   float input_gain) {
     duplex_ = true; // 是否双工
     input_reference_ = input_reference; // 是否使用参考输入，实现回声消除
     input_channels_ = input_reference_ ? 2 : 1; // 输入通道数
     input_sample_rate_ = input_sample_rate;
     output_sample_rate_ = output_sample_rate;
-    input_gain_ = 30;
+    input_gain_ = input_gain;
 
     CreateDuplexChannels(mclk, bclk, ws, dout, din);
 
@@ -194,7 +198,7 @@ void CoreS3AudioCodec::EnableInput(bool enable) {
     if (enable) {
         esp_codec_dev_sample_info_t fs = {
             .bits_per_sample = 16,
-            .channel = 2,
+            .channel = 4,
             .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
             .sample_rate = (uint32_t)output_sample_rate_,
             .mclk_multiple = 0,
@@ -215,9 +219,9 @@ void CoreS3AudioCodec::EnableOutput(bool enable) {
         return;
     }
     if (enable) {
-        // Play 16bit 1 channel
+        // Four 16-bit RX slots share 64 BCLK/frame with two 32-bit TX slots.
         esp_codec_dev_sample_info_t fs = {
-            .bits_per_sample = 16,
+            .bits_per_sample = 32,
             .channel = 1,
             .channel_mask = 0,
             .sample_rate = (uint32_t)output_sample_rate_,
@@ -239,8 +243,24 @@ int CoreS3AudioCodec::Read(int16_t* dest, int samples) {
 }
 
 int CoreS3AudioCodec::Write(const int16_t* data, int samples) {
-    if (output_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_write(output_dev_, (void*)data, samples * sizeof(int16_t)));
+    if (!output_enabled_ || samples <= 0)
+        return 0;
+
+    // The audio service supplies signed PCM16. Expand into the high 16 bits
+    // of PCM32 without shifting a negative value or allocating per packet.
+    // Feed one 10 ms DMA frame per write instead of many smaller fragments.
+    std::array<int32_t, AUDIO_CODEC_DMA_FRAME_NUM> output;
+    int written = 0;
+    while (written < samples) {
+        const int count = std::min(samples - written, static_cast<int>(output.size()));
+        for (int i = 0; i < count; ++i)
+            output[i] = static_cast<int32_t>(data[written + i]) * 65536;
+        const int result = esp_codec_dev_write(output_dev_, output.data(), count * sizeof(int32_t));
+        if (result != ESP_CODEC_DEV_OK) {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(result);
+            return written;
+        }
+        written += count;
     }
-    return samples;
+    return written;
 }

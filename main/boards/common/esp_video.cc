@@ -1,6 +1,7 @@
 #include "sdkconfig.h"
 
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -9,6 +10,7 @@
 #include <unistd.h>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 
 #include "esp_imgfx_color_convert.h"
 #include "esp_video_device.h"
@@ -389,6 +391,11 @@ EspVideo::EspVideo(const esp_video_init_config_t& config) {
 }
 
 EspVideo::~EspVideo() {
+    std::lock_guard<std::recursive_mutex> lock(capture_mutex_);
+    if (encoder_thread_.joinable())
+        encoder_thread_.join();
+    heap_caps_free(frame_.data);
+    frame_.data = nullptr;
     if (streaming_on_ && video_fd_ >= 0) {
         int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         ioctl(video_fd_, VIDIOC_STREAMOFF, &type);
@@ -411,7 +418,10 @@ void EspVideo::SetExplainUrl(const std::string& url, const std::string& token) {
     explain_token_ = token;
 }
 
-bool EspVideo::Capture() {
+bool EspVideo::Capture() { return CaptureFrame(true, 2); }
+
+bool EspVideo::CaptureFrame(bool preview, int discard_frames) {
+    std::lock_guard<std::recursive_mutex> lock(capture_mutex_);
     if (encoder_thread_.joinable()) {
         encoder_thread_.join();
     }
@@ -422,7 +432,7 @@ bool EspVideo::Capture() {
         return false;
     }
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i <= discard_frames; i++) {
         struct v4l2_buffer buf = {};
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
@@ -430,7 +440,7 @@ bool EspVideo::Capture() {
             ESP_LOGE(TAG, "VIDIOC_DQBUF failed");
             return false;
         }
-        if (i == 2) {
+        if (i == discard_frames) {
             // 保存帧副本到PSRAM
             if (frame_.data) {
                 heap_caps_free(frame_.data);
@@ -773,6 +783,9 @@ bool EspVideo::Capture() {
         }
     }
 
+    if (!preview)
+        return true;
+
     // 显示预览图片
     auto display = Board::GetInstance().GetDisplay();
     if (display != nullptr) {
@@ -948,6 +961,9 @@ bool EspVideo::SetVFlip(bool enabled) {
  * @warning 如果摄像头缓冲区为空或网络连接失败，将返回错误信息
  */
 std::expected<std::string, std::string> EspVideo::Explain(const std::string& question) {
+    std::lock_guard<std::recursive_mutex> lock(capture_mutex_);
+    if (!frame_.data || frame_.len == 0)
+        return std::unexpected("No camera frame captured");
     if (explain_url_.empty()) {
         return std::unexpected("Image explain URL or token is not set");
     }
@@ -959,41 +975,70 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
         return std::unexpected("Failed to create JPEG queue");
     }
 
-    // We spawn a thread to encode the image to JPEG using optimized encoder (cost about 500ms and
-    // 8KB SRAM)
-    encoder_thread_ = std::thread([this, jpeg_queue]() {
-        uint16_t w = frame_.width ? frame_.width : 320;
-        uint16_t h = frame_.height ? frame_.height : 240;
-        v4l2_pix_fmt_t enc_fmt = frame_.format;
-        bool ok = image_to_jpeg_cb(
-            frame_.data, frame_.len, w, h, enc_fmt, 80,
-            [](void* arg, size_t index, const void* data, size_t len) -> size_t {
-                auto jpeg_queue = static_cast<QueueHandle_t>(arg);
-                JpegChunk chunk = {.data = nullptr, .len = len};
-                if (index == 0 && data != nullptr && len > 0) {
-                    chunk.data = (uint8_t*)heap_caps_aligned_alloc(
-                        16, len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                    if (chunk.data == nullptr) {
-                        ESP_LOGE(TAG, "Failed to allocate %zu bytes for JPEG chunk", len);
-                        chunk.len = 0;
+    auto log_memory = [](const char* stage) {
+        constexpr uint32_t internal = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        ESP_LOGI(
+            TAG,
+            "Photo memory: stage=%s, internal_free=%u, internal_min=%u, internal_largest=%u, "
+            "psram_free=%u",
+            stage, static_cast<unsigned>(heap_caps_get_free_size(internal)),
+            static_cast<unsigned>(heap_caps_get_minimum_free_size(internal)),
+            static_cast<unsigned>(heap_caps_get_largest_free_block(internal)),
+            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
+    };
+    // Declared before the encoder and HTTP locals so every exit reports after
+    // their cleanup. The minimum is since boot, not a per-request minimum.
+    struct MemoryReport {
+        decltype(log_memory)& report;
+        ~MemoryReport() { report("request_done"); }
+    } memory_report{log_memory};
+    log_memory("encode_start");
+    bool encoded = false;
+    try {
+        encoder_thread_ = std::thread([this, jpeg_queue, &encoded]() {
+            uint16_t w = frame_.width ? frame_.width : 320;
+            uint16_t h = frame_.height ? frame_.height : 240;
+            v4l2_pix_fmt_t enc_fmt = frame_.format;
+            encoded = image_to_jpeg_cb(
+                frame_.data, frame_.len, w, h, enc_fmt, 80,
+                [](void* arg, size_t index, const void* data, size_t len) -> size_t {
+                    auto jpeg_queue = static_cast<QueueHandle_t>(arg);
+                    JpegChunk chunk = {.data = nullptr, .len = len};
+                    if (index == 0 && data != nullptr && len > 0) {
+                        chunk.data = (uint8_t*)heap_caps_aligned_alloc(
+                            16, len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                        if (chunk.data == nullptr) {
+                            ESP_LOGE(TAG, "Failed to allocate %zu bytes for JPEG chunk", len);
+                            chunk.len = 0;
+                        } else {
+                            memcpy(chunk.data, data, len);
+                        }
                     } else {
-                        memcpy(chunk.data, data, len);
+                        chunk.len = 0;  // Sentinel or error
                     }
-                } else {
-                    chunk.len = 0;  // Sentinel or error
-                }
+                    xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
+                    return len;
+                },
+                jpeg_queue);
+
+            if (!encoded) {
+                JpegChunk chunk = {.data = nullptr, .len = 0};
                 xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
-                return len;
-            },
-            jpeg_queue);
+            }
+        });
+    } catch (const std::exception&) {
+        vQueueDelete(jpeg_queue);
+        log_memory("encoder_task_failed");
+        return std::unexpected("Not enough memory to start the JPEG encoder");
+    }
 
-        if (!ok) {
-            JpegChunk chunk = {.data = nullptr, .len = 0};
-            xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
-        }
-    });
+    // The pinned encoder emits one complete JPEG and an end marker. Its queue
+    // cannot fill before join. Reclaim codec scratch space and the task stack
+    // before TCP allocates its receive task from internal RAM.
+    encoder_thread_.join();
+    log_memory("encode_done");
 
-    auto drain_jpeg_queue = [this, jpeg_queue]() {
+    auto drain_jpeg_queue = [jpeg_queue]() {
         JpegChunk chunk;
         while (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) == pdPASS) {
             if (chunk.data != nullptr) {
@@ -1002,12 +1047,24 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
                 break;
             }
         }
-        encoder_thread_.join();
         vQueueDelete(jpeg_queue);
     };
 
+    JpegChunk first_chunk;
+    if (!encoded || xQueuePeek(jpeg_queue, &first_chunk, 0) != pdPASS ||
+        first_chunk.data == nullptr || first_chunk.len == 0) {
+        drain_jpeg_queue();
+        return std::unexpected("Failed to encode image to JPEG");
+    }
+    log_memory("http_open");
+
     auto network = Board::GetInstance().GetNetwork();
     auto http = network->CreateHttp(3);
+    if (!http) {
+        drain_jpeg_queue();
+        return std::unexpected("Could not create the image HTTP client");
+    }
+    http->SetTimeout(15000);
     // 构造multipart/form-data请求体
     std::string boundary = "----ESP32_CAMERA_BOUNDARY";
 
@@ -1021,13 +1078,15 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
     http->SetHeader("Transfer-Encoding", "chunked");
     if (auto opened = http->Open("POST", explain_url_); !opened) {
         ESP_LOGE(TAG, "Failed to connect to explain URL: %s", opened.error().ToString().c_str());
+        log_memory("http_open_failed");
         drain_jpeg_queue();
         return std::unexpected("Failed to connect to explain URL");
     }
+    log_memory("http_connected");
 
     auto write_or_fail = [&http](const char* data, size_t size) -> bool {
-        if (auto written = http->Write(data, size); !written) {
-            ESP_LOGE(TAG, "Failed to upload photo: %s", written.error().ToString().c_str());
+        if (auto written = http->Write(data, size); !written || (size > 0 && *written <= 0)) {
+            ESP_LOGE(TAG, "Failed to upload photo");
             return true;
         }
         return false;
@@ -1082,8 +1141,6 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
         }
         total_sent += chunk.len;
     }
-    // Wait for the encoder thread to finish
-    encoder_thread_.join();
     // 清理队列
     vQueueDelete(jpeg_queue);
 
@@ -1119,14 +1176,26 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
         return std::unexpected("Failed to upload photo");
     }
 
-    std::string result = http->ReadAll();
+    std::string result;
+    const int64_t deadline = esp_timer_get_time() + 30000000;
+    char buffer[512];
+    while (esp_timer_get_time() < deadline) {
+        const auto count = http->Read(buffer, sizeof(buffer));
+        if (!count || *count < 0 || static_cast<size_t>(*count) > sizeof(buffer) ||
+            result.size() + *count > 64 * 1024) {
+            http->Close();
+            return std::unexpected("Invalid or interrupted image service response");
+        }
+        if (*count == 0) {
+            http->Close();
+            if (result.empty())
+                return std::unexpected("Empty image service response");
+            ESP_LOGI(TAG, "Image explanation complete: jpeg_bytes=%u, response_bytes=%u",
+                     static_cast<unsigned>(total_sent), static_cast<unsigned>(result.size()));
+            return result;
+        }
+        result.append(buffer, *count);
+    }
     http->Close();
-
-    // Get remain task stack size
-    size_t remain_stack_size = uxTaskGetStackHighWaterMark(nullptr);
-    ESP_LOGI(
-        TAG,
-        "Explain image size=%d bytes, compressed size=%d, remain stack size=%d, question=%s\n%s",
-        (int)frame_.len, (int)total_sent, (int)remain_stack_size, question.c_str(), result.c_str());
-    return result;
+    return std::unexpected("Image service response timed out");
 }

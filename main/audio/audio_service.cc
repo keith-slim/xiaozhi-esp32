@@ -364,7 +364,7 @@ void AudioService::AudioOutputTask() {
                     callbacks_.on_speech_playback_progress(played_ms);
                 }
 
-                // Detect a return to speech after >= 180 ms of low-energy PCM.
+                // Detect a return to speech after >= 120 ms of low-energy PCM.
                 // This is a phrase-boundary *candidate*, not a guaranteed
                 // punctuation/word alignment. A single 10-ms window avoids
                 // treating a brief zero crossing as a pause.
@@ -392,7 +392,7 @@ void AudioService::AudioOutputTask() {
                             const uint64_t at_sample = start_sample + pos;
                             if (speech_has_voice_ &&
                                 speech_silence_samples_ >=
-                                    static_cast<uint64_t>(sample_rate) * 180 / 1000 &&
+                                    static_cast<uint64_t>(sample_rate) * 120 / 1000 &&
                                 at_sample >= speech_last_pause_samples_ +
                                     static_cast<uint64_t>(sample_rate) * 700 / 1000 &&
                                 callbacks_.on_speech_phrase_boundary) {

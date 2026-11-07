@@ -6,6 +6,7 @@
 #include <freertos/task.h>
 #include <esp_timer.h>
 
+#include <atomic>
 #include <string>
 #include <mutex>
 #include <deque>

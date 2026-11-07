@@ -238,6 +238,15 @@ void Application::Run() {
         if (bits & MAIN_EVENT_PLAYBACK_DRAINED) {
             if (audio_service_.IsPlaybackIdle()) {
                 notify_player_.OnPlaybackDrained();
+                // TTS stop can arrive before decoded PCM has finished playing.
+                // Do not enter listening mode early: otherwise playback ticks
+                // stop and StackChan treats all remaining text as a review.
+                if (tts_stop_pending_ && GetDeviceState() == kDeviceStateSpeaking) {
+                    tts_stop_pending_ = false;
+                    ESP_LOGI(TAG, "TTS playback drained; leaving speaking state");
+                    SetDeviceState(listening_mode_ == kListeningModeManualStop
+                                       ? kDeviceStateIdle : kDeviceStateListening);
+                }
             }
             // Deferred listening start (auto mode): the playback queue has
             // drained, so it is now safe to enable voice processing.
@@ -666,18 +675,21 @@ void Application::InitializeProtocol() {
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
                     aborted_ = false;
+                    tts_stop_pending_ = false;
                     last_speech_subtitle_tick_ms_.store(0);
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
+                    if (GetDeviceState() != kDeviceStateSpeaking) return;
+                    if (!audio_service_.IsPlaybackIdle()) {
+                        tts_stop_pending_ = true;
+                        ESP_LOGI(TAG, "TTS stop received; awaiting PCM playback drain");
+                        return;
                     }
+                    tts_stop_pending_ = false;
+                    SetDeviceState(listening_mode_ == kListeningModeManualStop
+                                       ? kDeviceStateIdle : kDeviceStateListening);
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");

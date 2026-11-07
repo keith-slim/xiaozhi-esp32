@@ -144,6 +144,7 @@ private:
     std::string startup_wake_word_hint_message_;
     AudioService audio_service_;
     std::atomic<uint32_t> last_speech_subtitle_tick_ms_{0};
+    bool tts_stop_pending_ = false;  // Stay in speaking state until actual queued PCM drains.
     NotifyPlayer notify_player_;
     uint32_t notification_playback_id_ = 0;
     std::unique_ptr<Ota> ota_;

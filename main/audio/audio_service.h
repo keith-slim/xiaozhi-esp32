@@ -87,6 +87,8 @@ struct AudioServiceCallbacks {
     // Fired when the decode/playback queues and their in-flight work are drained.
     std::function<void(void)> on_playback_drained;
     std::function<void(uint32_t playback_id, uint32_t media_position_ms)> on_playback_progress;
+    // Position of regular TTS audio actually submitted to the speaker, in milliseconds.
+    std::function<void(uint32_t played_ms)> on_speech_playback_progress;
 };
 
 enum AudioTaskType {
@@ -195,6 +197,7 @@ private:
     bool output_in_flight_ = false;
     bool playback_drained_notified_ = true;
     uint32_t playback_generation_ = 0;
+    std::atomic<uint64_t> speech_output_samples_{0};
     // For server AEC
     FixedQueue<uint32_t, MAX_TIMESTAMPS_IN_QUEUE> timestamp_queue_;
 

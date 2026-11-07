@@ -89,6 +89,8 @@ struct AudioServiceCallbacks {
     std::function<void(uint32_t playback_id, uint32_t media_position_ms)> on_playback_progress;
     // Position of regular TTS audio actually submitted to the speaker, in milliseconds.
     std::function<void(uint32_t played_ms)> on_speech_playback_progress;
+    // A new voiced region started after a sustained silence in the output PCM.
+    std::function<void(uint32_t played_ms)> on_speech_phrase_boundary;
 };
 
 enum AudioTaskType {
@@ -198,6 +200,13 @@ private:
     bool playback_drained_notified_ = true;
     uint32_t playback_generation_ = 0;
     std::atomic<uint64_t> speech_output_samples_{0};
+    // Only the output task mutates these pause-detection fields. Decoder reset
+    // requests a fresh detector state through an atomic generation counter.
+    std::atomic<uint32_t> speech_pause_reset_generation_{0};
+    uint32_t speech_pause_seen_generation_ = 0;
+    uint64_t speech_silence_samples_ = 0;
+    uint64_t speech_last_pause_samples_ = 0;
+    bool speech_has_voice_ = false;
     // For server AEC
     FixedQueue<uint32_t, MAX_TIMESTAMPS_IN_QUEUE> timestamp_queue_;
 

@@ -350,6 +350,17 @@ void AudioService::AudioOutputTask() {
 
         codec_->OutputData(task.pcm);
 
+        // Unlike sentence_start, this runs only after PCM is delivered to the audio codec.
+        // Notifications use a non-zero playback_id and have their own subtitle clock.
+        if (task.playback_id == 0 && callbacks_.on_speech_playback_progress) {
+            const auto total_samples = speech_output_samples_.fetch_add(task.pcm.size()) + task.pcm.size();
+            const auto sample_rate = codec_->output_sample_rate();
+            if (sample_rate > 0) {
+                callbacks_.on_speech_playback_progress(
+                    static_cast<uint32_t>(total_samples * 1000 / sample_rate));
+            }
+        }
+
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
         debug_statistics_.playback_count++;
@@ -800,6 +811,7 @@ bool AudioService::IsPlaybackIdle() {
 }
 
 void AudioService::ResetDecoder() {
+    speech_output_samples_.store(0);
     bool notify_drained = false;
     {
         std::lock_guard<std::mutex> lock(audio_queue_mutex_);

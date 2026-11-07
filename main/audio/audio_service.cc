@@ -350,14 +350,61 @@ void AudioService::AudioOutputTask() {
 
         codec_->OutputData(task.pcm);
 
-        // Unlike sentence_start, this runs only after PCM is delivered to the audio codec.
-        // Notifications use a non-zero playback_id and have their own subtitle clock.
-        if (task.playback_id == 0 && callbacks_.on_speech_playback_progress) {
-            const auto total_samples = speech_output_samples_.fetch_add(task.pcm.size()) + task.pcm.size();
+        // Use the PCM submitted to the speaker as the only subtitle clock.
+        // Notifications have a separate non-zero playback_id.
+        if (task.playback_id == 0) {
+            const auto total_samples =
+                speech_output_samples_.fetch_add(task.pcm.size()) + task.pcm.size();
             const auto sample_rate = codec_->output_sample_rate();
             if (sample_rate > 0) {
-                callbacks_.on_speech_playback_progress(
-                    static_cast<uint32_t>(total_samples * 1000 / sample_rate));
+                const uint32_t played_ms =
+                    static_cast<uint32_t>(total_samples * 1000 / sample_rate);
+                if (callbacks_.on_speech_playback_progress) {
+                    callbacks_.on_speech_playback_progress(played_ms);
+                }
+
+                // Detect a return to speech after >= 180 ms of low-energy PCM.
+                // This is a phrase-boundary *candidate*, not a guaranteed
+                // punctuation/word alignment. A single 10-ms window avoids
+                // treating a brief zero crossing as a pause.
+                const uint32_t generation = speech_pause_reset_generation_.load();
+                if (speech_pause_seen_generation_ != generation) {
+                    speech_pause_seen_generation_ = generation;
+                    speech_silence_samples_ = 0;
+                    speech_last_pause_samples_ = 0;
+                    speech_has_voice_ = false;
+                }
+                const size_t window = static_cast<size_t>(sample_rate / 100);
+                if (window != 0) {
+                    const uint64_t start_sample = total_samples - task.pcm.size();
+                    for (size_t pos = 0; pos < task.pcm.size();) {
+                        const size_t end = std::min(pos + window, task.pcm.size());
+                        uint64_t energy = 0;
+                        for (size_t i = pos; i < end; ++i) {
+                            const int32_t value = task.pcm[i];
+                            energy += static_cast<uint32_t>(value < 0 ? -value : value);
+                        }
+                        const bool quiet = energy < 300u * (end - pos);
+                        if (quiet) {
+                            if (speech_has_voice_) speech_silence_samples_ += end - pos;
+                        } else {
+                            const uint64_t at_sample = start_sample + pos;
+                            if (speech_has_voice_ &&
+                                speech_silence_samples_ >=
+                                    static_cast<uint64_t>(sample_rate) * 180 / 1000 &&
+                                at_sample >= speech_last_pause_samples_ +
+                                    static_cast<uint64_t>(sample_rate) * 700 / 1000 &&
+                                callbacks_.on_speech_phrase_boundary) {
+                                speech_last_pause_samples_ = at_sample;
+                                callbacks_.on_speech_phrase_boundary(
+                                    static_cast<uint32_t>(at_sample * 1000 / sample_rate));
+                            }
+                            speech_has_voice_ = true;
+                            speech_silence_samples_ = 0;
+                        }
+                        pos = end;
+                    }
+                }
             }
         }
 
@@ -812,6 +859,7 @@ bool AudioService::IsPlaybackIdle() {
 
 void AudioService::ResetDecoder() {
     speech_output_samples_.store(0);
+    speech_pause_reset_generation_.fetch_add(1);
     bool notify_drained = false;
     {
         std::lock_guard<std::mutex> lock(audio_queue_mutex_);

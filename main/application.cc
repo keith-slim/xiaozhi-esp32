@@ -109,6 +109,14 @@ void Application::Initialize() {
             }
         });
     };
+    callbacks.on_speech_phrase_boundary = [this](uint32_t played_ms) {
+        if (GetDeviceState() != kDeviceStateSpeaking) return;
+        Schedule([this, played_ms]() {
+            if (GetDeviceState() != kDeviceStateSpeaking) return;
+            const auto elapsed = std::to_string(played_ms);
+            Board::GetInstance().GetDisplay()->SetChatMessage("assistant_pause", elapsed.c_str());
+        });
+    };
     audio_service_.SetCallbacks(callbacks);
 
     // Add state change listeners

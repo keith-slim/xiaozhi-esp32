@@ -97,6 +97,18 @@ void Application::Initialize() {
     callbacks.on_playback_progress = [this](uint32_t playback_id, uint32_t media_position_ms) {
         notify_player_.OnPlaybackProgress(playback_id, media_position_ms);
     };
+    callbacks.on_speech_playback_progress = [this](uint32_t played_ms) {
+        if (GetDeviceState() != kDeviceStateSpeaking) return;
+        const uint32_t previous = last_speech_subtitle_tick_ms_.load();
+        if (played_ms < previous || (played_ms - previous < 180 && previous != 0)) return;
+        last_speech_subtitle_tick_ms_.store(played_ms);
+        Schedule([this, played_ms]() {
+            if (GetDeviceState() == kDeviceStateSpeaking) {
+                const auto elapsed = std::to_string(played_ms);
+                Board::GetInstance().GetDisplay()->SetChatMessage("assistant_tick", elapsed.c_str());
+            }
+        });
+    };
     audio_service_.SetCallbacks(callbacks);
 
     // Add state change listeners
@@ -654,6 +666,7 @@ void Application::InitializeProtocol() {
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
                     aborted_ = false;
+                    last_speech_subtitle_tick_ms_.store(0);
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {

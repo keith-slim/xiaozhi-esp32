@@ -245,6 +245,32 @@ void AudioService::AudioInputTask() {
                                                   AS_EVENT_WAKE_WORD_RUNNING |
                                                   AS_EVENT_AUDIO_PROCESSOR_RUNNING;
 
+    // Diagnostic-only timing: collect in the input task, log at most once/10 s.
+    // Each sample is one microphone read plus one audio-engine Feed call.
+    uint64_t read_total_us = 0;
+    uint64_t feed_total_us = 0;
+    uint32_t read_max_us = 0;
+    uint32_t feed_max_us = 0;
+    uint32_t input_frames = 0;
+    uint32_t read_failures = 0;
+    int64_t timing_last_log_us = esp_timer_get_time();
+    auto report_input_timing = [&]() {
+        const int64_t now = esp_timer_get_time();
+        if (now - timing_last_log_us < 10000000) return;
+        ESP_LOGI(TAG,
+                 "[AUDIO_TIMING] input frames=%lu read_avg=%luus read_max=%luus "
+                 "feed_avg=%luus feed_max=%luus read_fail=%lu /10s",
+                 static_cast<unsigned long>(input_frames),
+                 static_cast<unsigned long>(input_frames ? read_total_us / input_frames : 0),
+                 static_cast<unsigned long>(read_max_us),
+                 static_cast<unsigned long>(input_frames ? feed_total_us / input_frames : 0),
+                 static_cast<unsigned long>(feed_max_us),
+                 static_cast<unsigned long>(read_failures));
+        input_frames = read_failures = read_max_us = feed_max_us = 0;
+        read_total_us = feed_total_us = 0;
+        timing_last_log_us = now;
+    };
+
     while (true) {
         EventBits_t bits = xEventGroupWaitBits(
             event_group_, kAudioInputActiveBits | AS_EVENT_AUDIO_INPUT_STOP_REQUEST, pdFALSE,
@@ -311,10 +337,25 @@ void AudioService::AudioInputTask() {
         if (bits & (AS_EVENT_WAKE_WORD_RUNNING | AS_EVENT_AUDIO_PROCESSOR_RUNNING)) {
             int samples = 160;  // 10ms
             std::vector<int16_t> data;
-            if (ReadAudioData(data, 16000, samples)) {
+            const int64_t read_begin = esp_timer_get_time();
+            const bool read_ok = ReadAudioData(data, 16000, samples);
+            const int64_t read_end = esp_timer_get_time();
+            if (read_ok) {
+                const int64_t feed_begin = read_end;
                 audio_engine_->Feed(std::move(data));
+                const int64_t feed_end = esp_timer_get_time();
+                const auto read_us = static_cast<uint32_t>(read_end - read_begin);
+                const auto feed_us = static_cast<uint32_t>(feed_end - feed_begin);
+                read_total_us += read_us;
+                feed_total_us += feed_us;
+                read_max_us = std::max(read_max_us, read_us);
+                feed_max_us = std::max(feed_max_us, feed_us);
+                ++input_frames;
+                report_input_timing();
                 continue;
             }
+            ++read_failures;
+            report_input_timing();
         }
 
         // Read timeout/error should not terminate the input task.

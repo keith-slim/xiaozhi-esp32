@@ -1,5 +1,6 @@
 #include "afe_audio_engine.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <string_view>
@@ -414,6 +415,31 @@ void AfeAudioEngine::ApplyPendingReset() {
 }
 
 void AfeAudioEngine::ProcessingTask() {
+    // Per-task counters; no allocations or logging in the per-frame hot path.
+    uint64_t fetch_total_us = 0;
+    uint64_t process_total_us = 0;
+    uint32_t fetch_max_us = 0;
+    uint32_t process_max_us = 0;
+    uint32_t fetch_frames = 0;
+    uint32_t fetch_errors = 0;
+    int64_t timing_last_log_us = esp_timer_get_time();
+    auto report_afe_timing = [&]() {
+        const int64_t now = esp_timer_get_time();
+        if (now - timing_last_log_us < 10000000) return;
+        ESP_LOGI(TAG,
+                 "[AUDIO_TIMING] afe fetch_avg=%luus fetch_max=%luus "
+                 "process_avg=%luus process_max=%luus frames=%lu errors=%lu /10s",
+                 static_cast<unsigned long>(fetch_frames ? fetch_total_us / fetch_frames : 0),
+                 static_cast<unsigned long>(fetch_max_us),
+                 static_cast<unsigned long>(fetch_frames ? process_total_us / fetch_frames : 0),
+                 static_cast<unsigned long>(process_max_us),
+                 static_cast<unsigned long>(fetch_frames),
+                 static_cast<unsigned long>(fetch_errors));
+        fetch_total_us = process_total_us = 0;
+        fetch_max_us = process_max_us = fetch_frames = fetch_errors = 0;
+        timing_last_log_us = now;
+    };
+
     while (true) {
         xEventGroupWaitBits(event_group_, kAfeActive, pdFALSE, pdTRUE, portMAX_DELAY);
         ApplyPendingReset();
@@ -426,7 +452,9 @@ void AfeAudioEngine::ProcessingTask() {
             ApplyAfeControls();
         }
         const uint32_t generation = control_generation_.load();
+        const int64_t fetch_begin = esp_timer_get_time();
         auto* result = afe_iface_->fetch_with_delay(afe_data_, portMAX_DELAY);
+        const int64_t fetch_end = esp_timer_get_time();
         if (generation != control_generation_.load() ||
             (xEventGroupGetBits(event_group_) & kAfeActive) == 0) {
             // A disable/re-enable may make an old blocked fetch return after the
@@ -435,9 +463,11 @@ void AfeAudioEngine::ProcessingTask() {
             continue;
         }
         if (result == nullptr || result->ret_value == ESP_FAIL) {
+            ++fetch_errors;
             if (result != nullptr) {
                 ESP_LOGW(TAG, "AFE fetch failed: %d", result->ret_value);
             }
+            report_afe_timing();
             continue;
         }
 
@@ -448,6 +478,15 @@ void AfeAudioEngine::ProcessingTask() {
         if (kUseAfeForVoiceProcessing && (bits & kVoiceProcessingEnabled)) {
             HandleVoiceResult(result);
         }
+        const int64_t process_end = esp_timer_get_time();
+        const auto fetch_us = static_cast<uint32_t>(fetch_end - fetch_begin);
+        const auto process_us = static_cast<uint32_t>(process_end - fetch_end);
+        fetch_total_us += fetch_us;
+        process_total_us += process_us;
+        fetch_max_us = std::max(fetch_max_us, fetch_us);
+        process_max_us = std::max(process_max_us, process_us);
+        ++fetch_frames;
+        report_afe_timing();
     }
 }
 

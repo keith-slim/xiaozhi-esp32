@@ -253,6 +253,11 @@ void AudioService::AudioInputTask() {
     uint32_t feed_max_us = 0;
     uint32_t input_frames = 0;
     uint32_t read_failures = 0;
+    // The active event-group bits remain set throughout capture, so a successful
+    // read/feed loop can run continuously on core 0 at priority 8. Give IDLE0
+    // a brief scheduling window periodically to prevent task WDT starvation
+    // without adding a delay to every 10-ms audio frame.
+    uint32_t frames_since_idle_yield = 0;
     int64_t timing_last_log_us = esp_timer_get_time();
     auto report_input_timing = [&]() {
         const int64_t now = esp_timer_get_time();
@@ -352,6 +357,12 @@ void AudioService::AudioInputTask() {
                 feed_max_us = std::max(feed_max_us, feed_us);
                 ++input_frames;
                 report_input_timing();
+                if (++frames_since_idle_yield >= 50) {
+                    frames_since_idle_yield = 0;
+                    // A FreeRTOS delay (not taskYIELD) lets lower-priority
+                    // idle tasks run, including the core-0 watchdog feeder.
+                    vTaskDelay(1);
+                }
                 continue;
             }
             ++read_failures;

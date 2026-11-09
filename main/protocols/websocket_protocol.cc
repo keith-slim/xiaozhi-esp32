@@ -135,7 +135,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
     websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
 
-    websocket_->OnData([this](const char* data, size_t len, bool binary) {
+    websocket_->OnData([this, generation, intentional_close](const char* data, size_t len, bool binary) {
         if (binary) {
             if (on_incoming_audio_ != nullptr) {
                 if (version_ == 2) {
@@ -175,6 +175,17 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
             if (cJSON_IsString(type)) {
                 if (strcmp(type->valuestring, "hello") == 0) {
                     ParseServerHello(root);
+                } else if (strcmp(type->valuestring, "session") == 0) {
+                    // Only the explicit server idle timeout is a normal end
+                    // of conversation. Provider and network failures still
+                    // trigger automatic reconnect.
+                    auto reason = cJSON_GetObjectItem(root, "reason");
+                    if (cJSON_IsString(reason) &&
+                        strcmp(reason->valuestring, "idle") == 0 &&
+                        generation == websocket_generation_.load()) {
+                        intentional_close->store(true);
+                        ESP_LOGI(TAG, "Server ended idle session; returning to wake-word standby");
+                    }
                 } else {
                     if (on_incoming_json_ != nullptr) {
                         on_incoming_json_(root);

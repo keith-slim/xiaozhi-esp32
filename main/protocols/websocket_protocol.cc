@@ -60,7 +60,9 @@ bool WebsocketProtocol::SendText(const std::string& text) {
 
     if (!websocket_->Send(text)) {
         ESP_LOGE(TAG, "Failed to send text: %s", text.c_str());
-        SetError(Lang::Strings::SERVER_ERROR);
+        if (report_connect_errors_) {
+            SetError(Lang::Strings::SERVER_ERROR);
+        }
         return false;
     }
 
@@ -73,10 +75,30 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
 
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
+    if (intentional_close_) {
+        intentional_close_->store(true);
+    }
     websocket_.reset();
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
+    return OpenAudioChannelInternal(true);
+}
+
+bool WebsocketProtocol::ReconnectAudioChannel() {
+    return OpenAudioChannelInternal(false);
+}
+
+bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
+    // Discard the previous transport before creating another one. Incrementing
+    // the generation makes late callbacks from the old socket harmless.
+    const unsigned generation = websocket_generation_.fetch_add(1) + 1;
+    if (intentional_close_) {
+        intentional_close_->store(true);
+    }
+    websocket_.reset();
+    report_connect_errors_ = report_errors;
+
     Settings settings("websocket", false);
     std::string url = settings.GetString("url");
     std::string token = settings.GetString("token");
@@ -93,6 +115,9 @@ bool WebsocketProtocol::OpenAudioChannel() {
         ESP_LOGE(TAG, "Failed to create websocket");
         return false;
     }
+    intentional_close_ = std::make_shared<std::atomic<bool>>(false);
+    auto intentional_close = intentional_close_;
+    auto disconnect_notified = std::make_shared<std::atomic<bool>>(false);
 
     if (!token.empty()) {
         // If token not has a space, add "Bearer " prefix
@@ -169,8 +194,17 @@ bool WebsocketProtocol::OpenAudioChannel() {
         });
     });
 
-    websocket_->OnDisconnected([this]() {
-        ESP_LOGI(TAG, "Websocket disconnected");
+    websocket_->OnDisconnected([this, generation, intentional_close, disconnect_notified]() {
+        if (generation != websocket_generation_.load() || disconnect_notified->exchange(true)) {
+            return;
+        }
+        const bool unexpected = !intentional_close->load();
+        ESP_LOGI(TAG, "Websocket disconnected (%s)", unexpected ? "unexpected" : "requested");
+        // Notify unexpected loss first; Application snapshots its active state
+        // before the regular close callback transitions it back to idle.
+        if (unexpected && on_disconnected_ != nullptr) {
+            on_disconnected_();
+        }
         if (on_audio_channel_closed_ != nullptr) {
             on_audio_channel_closed_();
         }
@@ -180,7 +214,9 @@ bool WebsocketProtocol::OpenAudioChannel() {
     if (auto connected = websocket_->Connect(url.c_str()); !connected) {
         ESP_LOGE(TAG, "Failed to connect to websocket server: %s",
                  connected.error().ToString().c_str());
-        SetError(Lang::Strings::SERVER_NOT_CONNECTED, url);
+        if (report_errors) {
+            SetError(Lang::Strings::SERVER_NOT_CONNECTED, url);
+        }
         return false;
     }
 
@@ -196,10 +232,13 @@ bool WebsocketProtocol::OpenAudioChannel() {
                             pdFALSE, pdMS_TO_TICKS(10000));
     if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
         ESP_LOGE(TAG, "Failed to receive server hello");
-        SetError(Lang::Strings::SERVER_TIMEOUT);
+        if (report_errors) {
+            SetError(Lang::Strings::SERVER_TIMEOUT);
+        }
         return false;
     }
 
+    report_connect_errors_ = true;
     if (on_audio_channel_opened_ != nullptr) {
         on_audio_channel_opened_();
     }

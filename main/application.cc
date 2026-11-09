@@ -315,6 +315,7 @@ void Application::Run() {
             clock_ticks_++;
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
+            MaybeReconnectAudioChannel();
 
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
@@ -372,6 +373,39 @@ void Application::HandleNetworkDisconnectedEvent() {
     // Update the status bar immediately to show the network state
     auto display = Board::GetInstance().GetDisplay();
     display->UpdateStatusBar(true);
+}
+
+void Application::MaybeReconnectAudioChannel() {
+    if (!auto_reconnect_pending_ || !is_websocket_protocol_ || !protocol_ ||
+        GetDeviceState() != kDeviceStateIdle || esp_timer_get_time() < auto_reconnect_due_us_) {
+        return;
+    }
+
+    // Only unexpected losses while a conversation was active arm this path.
+    // Manual stop, wake-word invocation, and normal connection attempts retain
+    // their existing behavior. Backoff retries do not play error sounds.
+    if (!SetDeviceState(kDeviceStateConnecting)) {
+        return;
+    }
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    ++auto_reconnect_attempts_;
+    ESP_LOGI(TAG, "Automatically reconnecting WebSocket (attempt %u)", auto_reconnect_attempts_);
+
+    auto* ws = static_cast<WebsocketProtocol*>(protocol_.get());
+    if (ws->ReconnectAudioChannel()) {
+        auto_reconnect_pending_ = false;
+        auto_reconnect_attempts_ = 0;
+        ESP_LOGI(TAG, "WebSocket reconnected; resuming microphone listening");
+        SetListeningMode(listening_mode_);
+        return;
+    }
+
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+    SetDeviceState(kDeviceStateIdle);
+    const unsigned shift = std::min(auto_reconnect_attempts_, 4u);
+    const unsigned delay_seconds = std::min(30u, 2u << shift);
+    auto_reconnect_due_us_ = esp_timer_get_time() + static_cast<int64_t>(delay_seconds) * 1000000;
+    ESP_LOGW(TAG, "WebSocket reconnect failed; next attempt in %u seconds", delay_seconds);
 }
 
 void Application::HandleActivationDoneEvent() {
@@ -594,15 +628,33 @@ void Application::InitializeProtocol() {
 
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
+    is_websocket_protocol_ = false;
+    auto_reconnect_pending_ = false;
     if (ota_->HasMqttConfig()) {
         protocol_ = std::make_unique<MqttProtocol>();
     } else if (ota_->HasWebsocketConfig()) {
         protocol_ = std::make_unique<WebsocketProtocol>();
+        is_websocket_protocol_ = true;
     } else {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
         protocol_ = std::make_unique<MqttProtocol>();
     }
 
+    if (is_websocket_protocol_) {
+        protocol_->OnDisconnected([this]() {
+            const DeviceState lost_state = GetDeviceState();
+            Schedule([this, lost_state]() {
+                if (!is_websocket_protocol_ || !protocol_ ||
+                    (lost_state != kDeviceStateListening && lost_state != kDeviceStateSpeaking)) {
+                    return;
+                }
+                auto_reconnect_pending_ = true;
+                auto_reconnect_attempts_ = 0;
+                auto_reconnect_due_us_ = esp_timer_get_time() + 2000000;
+                ESP_LOGW(TAG, "Unexpected WebSocket loss while chatting; reconnect scheduled in 2 seconds");
+            });
+        });
+    }
     protocol_->OnConnected([this]() { DismissAlert(); });
 
     protocol_->OnNetworkError([this](const std::string& message) {
@@ -878,6 +930,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
         }
     }
 
+    auto_reconnect_pending_ = false;
     SetListeningMode(mode);
 }
 
@@ -1016,6 +1069,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
         }
     }
 
+    auto_reconnect_pending_ = false;
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
 #if CONFIG_SEND_WAKE_WORD_DATA
     // Encode and send the wake word data to the server
@@ -1478,6 +1532,8 @@ void Application::ResetProtocol() {
             protocol_->CloseAudioChannel();
         }
         // Reset protocol
+        auto_reconnect_pending_ = false;
+        is_websocket_protocol_ = false;
         protocol_.reset();
     });
 }

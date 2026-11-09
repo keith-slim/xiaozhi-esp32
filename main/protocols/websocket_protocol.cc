@@ -14,7 +14,12 @@
 
 WebsocketProtocol::WebsocketProtocol() { event_group_handle_ = xEventGroupCreate(); }
 
-WebsocketProtocol::~WebsocketProtocol() { vEventGroupDelete(event_group_handle_); }
+WebsocketProtocol::~WebsocketProtocol() {
+    // Mark the transport as intentionally closed before its callbacks run.
+    // This must happen while the protocol callback members are still alive.
+    CloseAudioChannel();
+    vEventGroupDelete(event_group_handle_);
+}
 
 bool WebsocketProtocol::Start() {
     // Only connect to server when audio channel is needed

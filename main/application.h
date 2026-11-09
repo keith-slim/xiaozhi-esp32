@@ -160,6 +160,10 @@ private:
     bool pending_listening_start_ = false;  // Waiting for playback to drain before starting listening (auto mode)
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
+    bool is_websocket_protocol_ = false;
+    bool auto_reconnect_pending_ = false;
+    unsigned auto_reconnect_attempts_ = 0;
+    int64_t auto_reconnect_due_us_ = 0;
 
 
     // Event handlers
@@ -172,6 +176,7 @@ private:
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
     void ContinueOpenAudioChannel(ListeningMode mode);
+    void MaybeReconnectAudioChannel();
     void BeginWakeWordInvoke(const std::string& wake_word);
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void StartListeningAudio();

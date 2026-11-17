@@ -687,6 +687,7 @@ void Application::InitializeProtocol() {
 
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        announcement_pending_.store(false);
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
@@ -734,6 +735,12 @@ void Application::InitializeProtocol() {
                       subtitles = std::move(subtitles)]() mutable {
                 StartNotification(std::move(url), std::move(subtitles));
             });
+        } else if (strcmp(type->valuestring, "speak") == 0) {
+            auto state = cJSON_GetObjectItem(root, "state");
+            if (cJSON_IsString(state) && strcmp(state->valuestring, "error") == 0) {
+                ESP_LOGW(TAG, "[SPEAK] server rejected announcement");
+                Schedule([this]() { FinishAnnouncement(); });
+            }
         } else if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (!cJSON_IsString(state)) {
@@ -755,8 +762,9 @@ void Application::InitializeProtocol() {
                         return;
                     }
                     tts_stop_pending_ = false;
-                    SetDeviceState(listening_mode_ == kListeningModeManualStop
-                                       ? kDeviceStateIdle : kDeviceStateListening);
+                    if (announcement_pending_.load()) FinishAnnouncement();
+                    else SetDeviceState(listening_mode_ == kListeningModeManualStop
+                                            ? kDeviceStateIdle : kDeviceStateListening);
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");

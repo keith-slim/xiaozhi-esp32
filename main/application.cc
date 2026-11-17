@@ -1342,6 +1342,52 @@ void Application::HandleNotificationFinished(uint32_t playback_id, bool success)
     StopNotification();
 }
 
+
+bool Application::RequestAnnouncement(const char* kind, const char* text) {
+    if (!kind || !text || !text[0] || std::strlen(text) > 512 ||
+        (std::strcmp(kind, "touch") != 0 && std::strcmp(kind, "test") != 0) ||
+        !is_websocket_protocol_ || !protocol_ ||
+        GetDeviceState() != kDeviceStateIdle || notify_player_.IsBusy()) {
+        return false;
+    }
+    bool expected = false;
+    if (!announcement_pending_.compare_exchange_strong(expected, true)) return false;
+
+    Schedule([this, kind = std::string(kind), message = std::string(text)]() {
+        if (!protocol_ || !is_websocket_protocol_ || GetDeviceState() != kDeviceStateIdle ||
+            !SetDeviceState(kDeviceStateConnecting)) {
+            announcement_pending_.store(false);
+            return;
+        }
+        announcement_started_us_ = esp_timer_get_time();
+        // Publish CONNECTING before the potentially blocking WebSocket open.
+        Schedule([this, kind, message]() {
+            if (!announcement_pending_.load() || !protocol_ ||
+                GetDeviceState() != kDeviceStateConnecting) {
+                announcement_pending_.store(false);
+                return;
+            }
+            if ((!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel()) ||
+                !protocol_->SendAnnouncement(kind, message)) {
+                ESP_LOGW(TAG, "[SPEAK] cannot open/send announcement kind=%s", kind.c_str());
+                FinishAnnouncement();
+                return;
+            }
+            ESP_LOGI(TAG, "[SPEAK] sent on existing WebSocket kind=%s", kind.c_str());
+        });
+    });
+    return true;
+}
+
+void Application::FinishAnnouncement() {
+    if (!announcement_pending_.exchange(false)) return;
+    announcement_started_us_ = 0;
+    tts_stop_pending_ = false;
+    if (protocol_) protocol_->CloseAudioChannel();
+    if (GetDeviceState() != kDeviceStateIdle) SetDeviceState(kDeviceStateIdle);
+    ESP_LOGI(TAG, "[SPEAK] standalone announcement ended");
+}
+
 void Application::Schedule(std::function<void()>&& callback) {
     {
         std::lock_guard<std::mutex> lock(mutex_);

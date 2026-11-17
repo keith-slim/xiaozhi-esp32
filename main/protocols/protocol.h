@@ -66,6 +66,8 @@ public:
     virtual void SendStopListening();
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
+    // Optional StackChan text-only utterance over the existing audio WebSocket.
+    bool SendAnnouncement(const std::string& kind, const std::string& text);
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;

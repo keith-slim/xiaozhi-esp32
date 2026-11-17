@@ -264,7 +264,7 @@ class StartupWakeWordHintTests(unittest.TestCase):
             }
         '''
         driver = textwrap.dedent(platform).replace("ENGLISH_TEMPLATE", json.dumps(english, ensure_ascii=False))
-        driver += method + hide + textwrap.dedent(checks).replace("CHINESE_TEMPLATE", json.dumps(chinese, ensure_ascii=False))
+        driver += method + hide + textwrap.dedent(checks).replace("CHINESE_TEMPLATE", json.dumps(chinese, ensure_ascii=False)).replace("ENGLISH_TEMPLATE", json.dumps(english, ensure_ascii=False))
         self.compile_and_run(driver)
 
     def test_expiry_removes_only_the_hint_on_oled_classic_lcd_and_wechat_lcd(self):

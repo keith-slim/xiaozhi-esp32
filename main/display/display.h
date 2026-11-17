@@ -49,6 +49,9 @@ public:
     // physical refresh has already completed. Callers are free to ignore the result.
     virtual bool SetEmotion(const char* emotion);
     virtual void SetChatMessage(const char* role, const char* content);
+    // Opt-in: only StackChan uses the existing WebSocket for spoken startup
+    // hints. All other displays retain their original local hint behavior.
+    virtual bool SupportsStartupSpeech() const { return false; }
     // Remove a matching message without clearing newer content, when supported.
     virtual void RemoveChatMessage(const char* role, const char* content) {}
     virtual void ClearChatMessages();

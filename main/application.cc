@@ -1211,6 +1211,17 @@ void Application::ShowStartupWakeWordHint() {
         (xEventGroupGetBits(event_group_) & MAIN_EVENT_STATE_CHANGED)) {
         return;
     }
+    auto display = Board::GetInstance().GetDisplay();
+    const bool dedicated_startup = display->SupportsStartupSpeech();
+    // The activation chime uses the same decoder as a spoken announcement.
+    // Do not reset or preempt it. Wait briefly for its normal drain signal.
+    if (dedicated_startup && is_websocket_protocol_ && !audio_service_.IsPlaybackIdle()) {
+        const int64_t now_us = esp_timer_get_time();
+        if (startup_hint_voice_wait_since_us_ == 0)
+            startup_hint_voice_wait_since_us_ = now_us;
+        if (now_us - startup_hint_voice_wait_since_us_ < 5000000) return;
+        ESP_LOGW(TAG, "[STARTUP] audio still busy; showing original hint instead");
+    }
     pending_startup_wake_word_hint_ = false;
     const auto state = GetDeviceState();
     const bool wake_word_running = audio_service_.IsWakeWordRunning();
@@ -1257,7 +1268,18 @@ void Application::ShowStartupWakeWordHint() {
         ESP_ERROR_CHECK(esp_timer_create(&timer_args, &startup_wake_word_hint_timer_));
     }
     ESP_LOGI(TAG, "Startup wake word hint: %s", message.c_str());
-    Board::GetInstance().GetDisplay()->SetChatMessage("assistant", message.c_str());
+    // For StackChan only, reuse the same 12800 Gemini Live speech path used
+    // by touch wake. No second audio service or microphone session is created.
+    // The server subtitles are the only captions on successful startup speech.
+    if (dedicated_startup && is_websocket_protocol_ &&
+        audio_service_.IsPlaybackIdle() &&
+        RequestAnnouncement("startup", message.c_str())) {
+        ESP_LOGI(TAG, "[STARTUP] spoken announcement queued via WebSocket");
+        return;
+    }
+    // Preserve the original 5-second hint when voice is unavailable. StackChan
+    // handles startup_hint directly, outside the playback-synced TTS queue.
+    display->SetChatMessage(dedicated_startup ? "startup_hint" : "assistant", message.c_str());
     startup_wake_word_hint_message_ = std::move(message);
     ESP_ERROR_CHECK(esp_timer_start_once(startup_wake_word_hint_timer_, 5000 * 1000));
 }
@@ -1267,8 +1289,9 @@ void Application::HideStartupWakeWordHint() {
         return;
     }
     // A conversation or alert may have replaced the hint while its timer was running.
-    Board::GetInstance().GetDisplay()->RemoveChatMessage("assistant",
-                                                         startup_wake_word_hint_message_.c_str());
+    auto display = Board::GetInstance().GetDisplay();
+    display->RemoveChatMessage(display->SupportsStartupSpeech() ? "startup_hint" : "assistant",
+                               startup_wake_word_hint_message_.c_str());
     startup_wake_word_hint_message_.clear();
 }
 
@@ -1371,7 +1394,8 @@ void Application::HandleNotificationFinished(uint32_t playback_id, bool success)
 
 bool Application::RequestAnnouncement(const char* kind, const char* text) {
     if (!kind || !text || !text[0] || std::strlen(text) > 512 ||
-        (std::strcmp(kind, "touch") != 0 && std::strcmp(kind, "test") != 0) ||
+        (std::strcmp(kind, "touch") != 0 && std::strcmp(kind, "test") != 0 &&
+         std::strcmp(kind, "startup") != 0) ||
         !is_websocket_protocol_ || !protocol_ ||
         GetDeviceState() != kDeviceStateIdle || notify_player_.IsBusy()) {
         return false;

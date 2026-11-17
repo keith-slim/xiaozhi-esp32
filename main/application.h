@@ -147,6 +147,7 @@ private:
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     std::string startup_wake_word_hint_message_;
+    int64_t startup_hint_voice_wait_since_us_ = 0; // Main loop; bounded startup sound drain wait.
     AudioService audio_service_;
     std::atomic<uint32_t> last_speech_subtitle_tick_ms_{0};
     bool tts_stop_pending_ = false;  // Stay in speaking state until actual queued PCM drains.

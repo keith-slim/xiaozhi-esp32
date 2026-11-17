@@ -100,6 +100,7 @@ class StartupWakeWordHintTests(unittest.TestCase):
                 handle->deadline = now + delay;
                 return 0;
             }
+            int64_t esp_timer_get_time() { return now; }
             void advance_time(int64_t duration) {
                 now += duration;
                 for (auto& timer : timers) {
@@ -116,11 +117,14 @@ class StartupWakeWordHintTests(unittest.TestCase):
                 bool running = true;
                 std::vector<std::string> words = {"Hi,ESP", "", "Hi,ESP", "Alexa"};
                 bool IsWakeWordRunning() const { return running; }
+                bool IsPlaybackIdle() const { return true; }
                 std::vector<std::string> GetWakeWords() const { return words; }
             };
             class Display {
             public:
                 std::string status = "Standby";
+                bool startup_speech = false;
+                bool SupportsStartupSpeech() const { return startup_speech; }
                 std::vector<std::pair<std::string, std::string>> messages;
                 void SetChatMessage(const char* role, const char* content) {
                     messages.emplace_back(role, content);
@@ -147,6 +151,13 @@ class StartupWakeWordHintTests(unittest.TestCase):
                 DeviceState state = kDeviceStateIdle;
                 std::string last_error_message_;
                 AudioService audio_service_;
+                int64_t startup_hint_voice_wait_since_us_ = 0;
+                bool request_succeeds = false;
+                bool RequestAnnouncement(const char* kind, const char* message) {
+                    assert(std::string(kind) == "startup");
+                    assert(std::string(message).find("Hi,ESP") != std::string::npos);
+                    return request_succeeds;
+                }
                 DeviceState GetDeviceState() const { return state; }
                 void ShowStartupWakeWordHint();
                 void HideStartupWakeWordHint();

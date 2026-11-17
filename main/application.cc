@@ -698,6 +698,7 @@ void Application::InitializeProtocol() {
             // Preserve ordering with queued TTS stop/playback events. Clearing
             // the flag on the network callback thread could re-enable listening.
             if (announcement_pending_.exchange(false)) {
+                startup_announcement_active_.store(false);
                 announcement_started_us_ = 0;
                 tts_stop_pending_ = false;
                 announcement_subtitles_linger_ = true;
@@ -1402,11 +1403,13 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
     }
     bool expected = false;
     if (!announcement_pending_.compare_exchange_strong(expected, true)) return false;
+    startup_announcement_active_.store(std::strcmp(kind, "startup") == 0);
 
     Schedule([this, kind = std::string(kind), message = std::string(text)]() {
         if (!protocol_ || !is_websocket_protocol_ || GetDeviceState() != kDeviceStateIdle ||
             !SetDeviceState(kDeviceStateConnecting)) {
             announcement_pending_.store(false);
+            startup_announcement_active_.store(false);
             return;
         }
         announcement_started_us_ = esp_timer_get_time();
@@ -1415,6 +1418,7 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
             if (!announcement_pending_.load() || !protocol_ ||
                 GetDeviceState() != kDeviceStateConnecting) {
                 announcement_pending_.store(false);
+                startup_announcement_active_.store(false);
                 return;
             }
             if ((!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel()) ||
@@ -1430,6 +1434,7 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
 }
 
 void Application::FinishAnnouncement() {
+    startup_announcement_active_.store(false);
     if (!announcement_pending_.exchange(false)) return;
     announcement_started_us_ = 0;
     tts_stop_pending_ = false;

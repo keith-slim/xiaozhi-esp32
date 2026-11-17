@@ -153,6 +153,7 @@ class StartupWakeWordHintTests(unittest.TestCase):
                 AudioService audio_service_;
                 int64_t startup_hint_voice_wait_since_us_ = 0;
                 bool request_succeeds = false;
+                bool is_websocket_protocol_ = true;
                 bool RequestAnnouncement(const char* kind, const char* message) {
                     assert(std::string(kind) == "startup");
                     assert(std::string(message).find("Hi,ESP") != std::string::npos);
@@ -239,6 +240,27 @@ class StartupWakeWordHintTests(unittest.TestCase):
                 invalid.pending_startup_wake_word_hint_ = true;
                 invalid.ShowStartupWakeWordHint();
                 assert(display->messages.empty());
+
+                // StackChan opts into spoken startup hints; normal displays
+                // must retain the original 5-second local message.
+                Lang::Strings::WAKE_WORD_HINT = ENGLISH_TEMPLATE;
+                display->startup_speech = true;
+                Application spoken;
+                spoken.pending_startup_wake_word_hint_ = true;
+                spoken.request_succeeds = true;
+                spoken.ShowStartupWakeWordHint();
+                assert(display->messages.empty()); // Server owns its subtitles.
+                assert(!spoken.pending_startup_wake_word_hint_);
+                assert(spoken.startup_wake_word_hint_timer_ == nullptr);
+
+                Application fallback;
+                fallback.pending_startup_wake_word_hint_ = true;
+                fallback.ShowStartupWakeWordHint();
+                assert(display->messages.size() == 1);
+                assert(display->messages[0].first == "startup_hint");
+                fallback.HideStartupWakeWordHint();
+                assert(display->messages.empty());
+                display->startup_speech = false;
             }
         '''
         driver = textwrap.dedent(platform).replace("ENGLISH_TEMPLATE", json.dumps(english, ensure_ascii=False))

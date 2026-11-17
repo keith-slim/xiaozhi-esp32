@@ -252,8 +252,9 @@ void Application::Run() {
                 if (tts_stop_pending_ && GetDeviceState() == kDeviceStateSpeaking) {
                     tts_stop_pending_ = false;
                     ESP_LOGI(TAG, "TTS playback drained; leaving speaking state");
-                    SetDeviceState(listening_mode_ == kListeningModeManualStop
-                                       ? kDeviceStateIdle : kDeviceStateListening);
+                    if (announcement_pending_.load()) FinishAnnouncement();
+                    else SetDeviceState(listening_mode_ == kListeningModeManualStop
+                                            ? kDeviceStateIdle : kDeviceStateListening);
                 }
             }
             // Deferred listening start (auto mode): the playback queue has
@@ -316,6 +317,12 @@ void Application::Run() {
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
             MaybeReconnectAudioChannel();
+            // A failed standalone request must not hold wake-up indefinitely.
+            if (announcement_pending_.load() && announcement_started_us_ &&
+                esp_timer_get_time() - announcement_started_us_ > 75000000) {
+                ESP_LOGW(TAG, "[SPEAK] timeout waiting for announcement");
+                FinishAnnouncement();
+            }
 
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {

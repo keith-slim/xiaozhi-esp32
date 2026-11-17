@@ -99,6 +99,24 @@ void Protocol::SendStopListening() {
     SendText(message);
 }
 
+bool Protocol::SendAnnouncement(const std::string& kind, const std::string& text) {
+    cJSON* root = cJSON_CreateObject();
+    if (!root) return false;
+    const bool valid = cJSON_AddStringToObject(root, "type", "speak") &&
+                       cJSON_AddStringToObject(root, "kind", kind.c_str()) &&
+                       cJSON_AddStringToObject(root, "text", text.c_str());
+    if (!valid) {
+        cJSON_Delete(root);
+        return false;
+    }
+    char* data = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!data) return false;
+    const bool sent = SendText(data);
+    cJSON_free(data);
+    return sent;
+}
+
 void Protocol::SendMcpMessage(const std::string& payload) {
     std::string message =
         "{\"session_id\":\"" + session_id_ + "\",\"type\":\"mcp\",\"payload\":" + payload + "}";

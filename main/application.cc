@@ -693,9 +693,10 @@ void Application::InitializeProtocol() {
             if (announcement_pending_.exchange(false)) {
                 announcement_started_us_ = 0;
                 tts_stop_pending_ = false;
+                announcement_subtitles_linger_ = true;
             }
             auto display = Board::GetInstance().GetDisplay();
-            display->SetChatMessage("system", "");
+            if (!announcement_subtitles_linger_) display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
         });
     });
@@ -1127,7 +1128,8 @@ void Application::HandleStateChangedEvent() {
             // otherwise wipe the status, emotion, and chat message.
             if (last_error_message_.empty()) {
                 display->SetStatus(Lang::Strings::STANDBY);
-                display->ClearChatMessages();  // Clear messages first
+                if (!announcement_subtitles_linger_)
+                    display->ClearChatMessages();  // Keep standalone review
                 display->SetEmotion(
                     "neutral");  // Then set emotion (wechat mode checks child count)
             }
@@ -1135,6 +1137,7 @@ void Application::HandleStateChangedEvent() {
             audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
+            announcement_subtitles_linger_ = false;
             display->SetStatus(Lang::Strings::CONNECTING);
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");
@@ -1388,6 +1391,7 @@ void Application::FinishAnnouncement() {
     if (!announcement_pending_.exchange(false)) return;
     announcement_started_us_ = 0;
     tts_stop_pending_ = false;
+    announcement_subtitles_linger_ = true;
     if (protocol_) protocol_->CloseAudioChannel();
     if (GetDeviceState() != kDeviceStateIdle) SetDeviceState(kDeviceStateIdle);
     ESP_LOGI(TAG, "[SPEAK] standalone announcement ended");

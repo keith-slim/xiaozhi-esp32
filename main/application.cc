@@ -687,8 +687,13 @@ void Application::InitializeProtocol() {
 
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
-        announcement_pending_.store(false);
         Schedule([this]() {
+            // Preserve ordering with queued TTS stop/playback events. Clearing
+            // the flag on the network callback thread could re-enable listening.
+            if (announcement_pending_.exchange(false)) {
+                announcement_started_us_ = 0;
+                tts_stop_pending_ = false;
+            }
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);

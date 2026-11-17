@@ -33,7 +33,7 @@ public:
      * @param new_state The target state
      * @return true if transition was successful, false if invalid transition
      */
-    bool TransitionTo(DeviceState new_state);
+    bool TransitionTo(DeviceState new_state, bool allow_announcement_speech = false);
 
     /**
      * Check if transition to target state is valid from current state

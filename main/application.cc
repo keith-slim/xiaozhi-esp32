@@ -62,7 +62,14 @@ Application::~Application() {
     vEventGroupDelete(event_group_);
 }
 
-bool Application::SetDeviceState(DeviceState state) { return state_machine_.TransitionTo(state); }
+bool Application::SetDeviceState(DeviceState state) {
+    // A text-only WebSocket announcement goes directly from CONNECTING to
+    // SPEAKING. Permit that one transition without entering LISTENING or
+    // enabling the microphone; ordinary conversations retain strict rules.
+    const bool standalone_speech =
+        state == kDeviceStateSpeaking && announcement_pending_.load();
+    return state_machine_.TransitionTo(state, standalone_speech);
+}
 
 void Application::Initialize() {
     auto& board = Board::GetInstance();

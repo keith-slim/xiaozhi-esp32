@@ -110,7 +110,7 @@ bool DeviceStateMachine::CanTransitionTo(DeviceState target) const {
     return IsValidTransition(current_state_.load(), target);
 }
 
-bool DeviceStateMachine::TransitionTo(DeviceState new_state) {
+bool DeviceStateMachine::TransitionTo(DeviceState new_state, bool allow_announcement_speech) {
     DeviceState old_state = current_state_.load();
     
     // No-op if already in the target state
@@ -118,8 +118,13 @@ bool DeviceStateMachine::TransitionTo(DeviceState new_state) {
         return true;
     }
 
+    // Only standalone Gemini Live speech can skip LISTENING after the
+    // WebSocket handshake. Do not relax transitions for ordinary conversation.
+    const bool announcement_start = allow_announcement_speech &&
+        old_state == kDeviceStateConnecting && new_state == kDeviceStateSpeaking;
+
     // Validate transition
-    if (!IsValidTransition(old_state, new_state)) {
+    if (!announcement_start && !IsValidTransition(old_state, new_state)) {
         ESP_LOGW(TAG, "Invalid state transition: %s -> %s",
                  GetStateName(old_state), GetStateName(new_state));
         return false;

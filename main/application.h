@@ -119,6 +119,11 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
+    // Opt-in text-only speech using the existing Xiaozhi WebSocket/decoder.
+    // Nonblocking: no network work under the StackChan LVGL lock.
+    bool RequestAnnouncement(const char* kind, const char* text);
+    bool IsAnnouncementActive() const { return announcement_pending_.load(); }
+
     
     /**
      * Reset protocol resources (thread-safe)
@@ -145,6 +150,9 @@ private:
     AudioService audio_service_;
     std::atomic<uint32_t> last_speech_subtitle_tick_ms_{0};
     bool tts_stop_pending_ = false;  // Stay in speaking state until actual queued PCM drains.
+    std::atomic<bool> announcement_pending_{false};
+    int64_t announcement_started_us_ = 0; // main task only, bounded timeout
+
     NotifyPlayer notify_player_;
     uint32_t notification_playback_id_ = 0;
     std::unique_ptr<Ota> ota_;
@@ -177,6 +185,7 @@ private:
     void HandleWakeWordDetectedEvent();
     void ContinueOpenAudioChannel(ListeningMode mode);
     void MaybeReconnectAudioChannel();
+    void FinishAnnouncement();
     void BeginWakeWordInvoke(const std::string& wake_word);
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void StartListeningAudio();

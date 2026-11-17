@@ -67,7 +67,7 @@ bool Application::SetDeviceState(DeviceState state) {
     // SPEAKING. Permit that one transition without entering LISTENING or
     // enabling the microphone; ordinary conversations retain strict rules.
     const bool standalone_speech =
-        state == kDeviceStateSpeaking && announcement_pending_.load();
+        state == kDeviceStateSpeaking && IsAnnouncementActive();
     return state_machine_.TransitionTo(state, standalone_speech);
 }
 
@@ -259,7 +259,7 @@ void Application::Run() {
                 if (tts_stop_pending_ && GetDeviceState() == kDeviceStateSpeaking) {
                     tts_stop_pending_ = false;
                     ESP_LOGI(TAG, "TTS playback drained; leaving speaking state");
-                    if (announcement_pending_.load()) FinishAnnouncement();
+                    if (IsAnnouncementActive()) FinishAnnouncement();
                     else SetDeviceState(listening_mode_ == kListeningModeManualStop
                                             ? kDeviceStateIdle : kDeviceStateListening);
                 }
@@ -325,7 +325,7 @@ void Application::Run() {
             display->UpdateStatusBar();
             MaybeReconnectAudioChannel();
             // A failed standalone request must not hold wake-up indefinitely.
-            if (announcement_pending_.load() && announcement_started_us_ &&
+            if (IsAnnouncementActive() && announcement_started_us_ &&
                 esp_timer_get_time() - announcement_started_us_ > 75000000) {
                 ESP_LOGW(TAG, "[SPEAK] timeout waiting for announcement");
                 FinishAnnouncement();
@@ -697,7 +697,7 @@ void Application::InitializeProtocol() {
         Schedule([this]() {
             // Preserve ordering with queued TTS stop/playback events. Clearing
             // the flag on the network callback thread could re-enable listening.
-            if (announcement_pending_.exchange(false)) {
+            if (announcement_kind_.exchange(AnnouncementKind::None) != AnnouncementKind::None) {
                 announcement_started_us_ = 0;
                 tts_stop_pending_ = false;
                 announcement_subtitles_linger_ = true;
@@ -751,7 +751,7 @@ void Application::InitializeProtocol() {
         } else if (strcmp(type->valuestring, "glyphs") == 0) {
             // Standalone speech gets bounded glyph batches from Docker before
             // each subtitle. The normal TTS/STT glyph path is unchanged.
-            if (!announcement_pending_.load()) return;
+            if (!IsAnnouncementActive()) return;
             std::vector<TextGlyph> glyphs;
             uint8_t bpp = 0;
             if (TextGlyphPayload::Parse(root, glyphs, bpp) && !glyphs.empty()) {
@@ -786,7 +786,7 @@ void Application::InitializeProtocol() {
                         return;
                     }
                     tts_stop_pending_ = false;
-                    if (announcement_pending_.load()) FinishAnnouncement();
+                    if (IsAnnouncementActive()) FinishAnnouncement();
                     else SetDeviceState(listening_mode_ == kListeningModeManualStop
                                             ? kDeviceStateIdle : kDeviceStateListening);
                 });
@@ -1395,28 +1395,34 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
     // Never let an announcement reset a decoder while a chime, sound effect,
     // conversation, or another announcement is still playing.
     if (!kind || !text || !text[0] || std::strlen(text) > 512 ||
-        (std::strcmp(kind, "touch") != 0 && std::strcmp(kind, "test") != 0 &&
-         std::strcmp(kind, "startup") != 0) ||
         !is_websocket_protocol_ || !protocol_ ||
         GetDeviceState() != kDeviceStateIdle || notify_player_.IsBusy() ||
         !audio_service_.IsPlaybackIdle()) {
         return false;
     }
-    bool expected = false;
-    if (!announcement_pending_.compare_exchange_strong(expected, true)) return false;
+
+    AnnouncementKind requested = AnnouncementKind::None;
+    if (std::strcmp(kind, "touch") == 0) requested = AnnouncementKind::Touch;
+    else if (std::strcmp(kind, "test") == 0) requested = AnnouncementKind::Test;
+    else if (std::strcmp(kind, "startup") == 0) requested = AnnouncementKind::Startup;
+    else return false;
+
+    // One atomic admission operation protects every standalone speech source.
+    AnnouncementKind expected = AnnouncementKind::None;
+    if (!announcement_kind_.compare_exchange_strong(expected, requested)) return false;
 
     Schedule([this, kind = std::string(kind), message = std::string(text)]() {
         if (!protocol_ || !is_websocket_protocol_ || GetDeviceState() != kDeviceStateIdle ||
             !SetDeviceState(kDeviceStateConnecting)) {
-            announcement_pending_.store(false);
+            announcement_kind_.store(AnnouncementKind::None);
             return;
         }
         announcement_started_us_ = esp_timer_get_time();
         // Publish CONNECTING before the potentially blocking WebSocket open.
         Schedule([this, kind, message]() {
-            if (!announcement_pending_.load() || !protocol_ ||
+            if (!IsAnnouncementActive() || !protocol_ ||
                 GetDeviceState() != kDeviceStateConnecting) {
-                announcement_pending_.store(false);
+                announcement_kind_.store(AnnouncementKind::None);
                 return;
             }
             if ((!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel()) ||
@@ -1432,7 +1438,7 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
 }
 
 void Application::FinishAnnouncement() {
-    if (!announcement_pending_.exchange(false)) return;
+    if (announcement_kind_.exchange(AnnouncementKind::None) == AnnouncementKind::None) return;
     announcement_started_us_ = 0;
     tts_stop_pending_ = false;
     announcement_subtitles_linger_ = true;

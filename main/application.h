@@ -46,6 +46,10 @@ enum AecMode {
 };
 
 class Application {
+    // One atomic state represents both exclusive standalone speech ownership
+    // and its origin. No separate startup lifecycle/lock is required.
+    enum class AnnouncementKind : uint8_t { None, Touch, Test, Startup };
+
 public:
     static Application& GetInstance() {
         static Application instance;
@@ -122,7 +126,8 @@ public:
     // Opt-in text-only speech using the existing Xiaozhi WebSocket/decoder.
     // Nonblocking: no network work under the StackChan LVGL lock.
     bool RequestAnnouncement(const char* kind, const char* text);
-    bool IsAnnouncementActive() const { return announcement_pending_.load(); }
+    bool IsAnnouncementActive() const { return announcement_kind_.load() != AnnouncementKind::None; }
+    bool IsStartupAnnouncementActive() const { return announcement_kind_.load() == AnnouncementKind::Startup; }
 
     
     /**
@@ -151,7 +156,7 @@ private:
     AudioService audio_service_;
     std::atomic<uint32_t> last_speech_subtitle_tick_ms_{0};
     bool tts_stop_pending_ = false;  // Stay in speaking state until actual queued PCM drains.
-    std::atomic<bool> announcement_pending_{false};
+    std::atomic<AnnouncementKind> announcement_kind_{AnnouncementKind::None};
     int64_t announcement_started_us_ = 0; // main task only, bounded timeout
     bool announcement_subtitles_linger_ = false; // main task only
 

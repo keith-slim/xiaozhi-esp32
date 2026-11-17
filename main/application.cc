@@ -741,6 +741,17 @@ void Application::InitializeProtocol() {
                       subtitles = std::move(subtitles)]() mutable {
                 StartNotification(std::move(url), std::move(subtitles));
             });
+        } else if (strcmp(type->valuestring, "glyphs") == 0) {
+            // Standalone speech gets bounded glyph batches from Docker before
+            // each subtitle. The normal TTS/STT glyph path is unchanged.
+            if (!announcement_pending_.load()) return;
+            std::vector<TextGlyph> glyphs;
+            uint8_t bpp = 0;
+            if (TextGlyphPayload::Parse(root, glyphs, bpp) && !glyphs.empty()) {
+                Schedule([display, glyphs = std::move(glyphs), bpp]() {
+                    display->AddTextGlyphs(glyphs, bpp);
+                });
+            }
         } else if (strcmp(type->valuestring, "speak") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (cJSON_IsString(state) && strcmp(state->valuestring, "error") == 0) {

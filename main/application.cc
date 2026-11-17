@@ -698,7 +698,6 @@ void Application::InitializeProtocol() {
             // Preserve ordering with queued TTS stop/playback events. Clearing
             // the flag on the network callback thread could re-enable listening.
             if (announcement_pending_.exchange(false)) {
-                startup_announcement_active_.store(false);
                 announcement_started_us_ = 0;
                 tts_stop_pending_ = false;
                 announcement_subtitles_linger_ = true;
@@ -1254,6 +1253,18 @@ void Application::ShowStartupWakeWordHint() {
         return;
     }
     message.replace(placeholder, 2, words);
+    ESP_LOGI(TAG, "Startup wake word hint: %s", message.c_str());
+    // Use the same bounded 12800 announcement API as touch wake and Web test.
+    // The server owns its audio-synced captions; do not duplicate them locally.
+    if (dedicated_startup && RequestAnnouncement("startup", message.c_str())) {
+        ESP_LOGI(TAG, "[STARTUP] spoken announcement queued via WebSocket");
+        return;
+    }
+    // No transport available: retain the original five-second local hint.
+    // Use a separate message role only so timed removal cannot erase a newer
+    // conversation subtitle.
+    display->SetChatMessage(dedicated_startup ? "startup_hint" : "assistant", message.c_str());
+    startup_wake_word_hint_message_ = std::move(message);
     if (startup_wake_word_hint_timer_ == nullptr) {
         esp_timer_create_args_t timer_args = {
             .callback =
@@ -1268,20 +1279,6 @@ void Application::ShowStartupWakeWordHint() {
         };
         ESP_ERROR_CHECK(esp_timer_create(&timer_args, &startup_wake_word_hint_timer_));
     }
-    ESP_LOGI(TAG, "Startup wake word hint: %s", message.c_str());
-    // For StackChan only, reuse the same 12800 Gemini Live speech path used
-    // by touch wake. No second audio service or microphone session is created.
-    // The server subtitles are the only captions on successful startup speech.
-    if (dedicated_startup && is_websocket_protocol_ &&
-        audio_service_.IsPlaybackIdle() &&
-        RequestAnnouncement("startup", message.c_str())) {
-        ESP_LOGI(TAG, "[STARTUP] spoken announcement queued via WebSocket");
-        return;
-    }
-    // Preserve the original 5-second hint when voice is unavailable. StackChan
-    // handles startup_hint directly, outside the playback-synced TTS queue.
-    display->SetChatMessage(dedicated_startup ? "startup_hint" : "assistant", message.c_str());
-    startup_wake_word_hint_message_ = std::move(message);
     ESP_ERROR_CHECK(esp_timer_start_once(startup_wake_word_hint_timer_, 5000 * 1000));
 }
 
@@ -1394,22 +1391,24 @@ void Application::HandleNotificationFinished(uint32_t playback_id, bool success)
 
 
 bool Application::RequestAnnouncement(const char* kind, const char* text) {
+    // All standalone sources share one audio-transport admission gate.
+    // Never let an announcement reset a decoder while a chime, sound effect,
+    // conversation, or another announcement is still playing.
     if (!kind || !text || !text[0] || std::strlen(text) > 512 ||
         (std::strcmp(kind, "touch") != 0 && std::strcmp(kind, "test") != 0 &&
          std::strcmp(kind, "startup") != 0) ||
         !is_websocket_protocol_ || !protocol_ ||
-        GetDeviceState() != kDeviceStateIdle || notify_player_.IsBusy()) {
+        GetDeviceState() != kDeviceStateIdle || notify_player_.IsBusy() ||
+        !audio_service_.IsPlaybackIdle()) {
         return false;
     }
     bool expected = false;
     if (!announcement_pending_.compare_exchange_strong(expected, true)) return false;
-    startup_announcement_active_.store(std::strcmp(kind, "startup") == 0);
 
     Schedule([this, kind = std::string(kind), message = std::string(text)]() {
         if (!protocol_ || !is_websocket_protocol_ || GetDeviceState() != kDeviceStateIdle ||
             !SetDeviceState(kDeviceStateConnecting)) {
             announcement_pending_.store(false);
-            startup_announcement_active_.store(false);
             return;
         }
         announcement_started_us_ = esp_timer_get_time();
@@ -1418,7 +1417,6 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
             if (!announcement_pending_.load() || !protocol_ ||
                 GetDeviceState() != kDeviceStateConnecting) {
                 announcement_pending_.store(false);
-                startup_announcement_active_.store(false);
                 return;
             }
             if ((!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel()) ||
@@ -1434,7 +1432,6 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
 }
 
 void Application::FinishAnnouncement() {
-    startup_announcement_active_.store(false);
     if (!announcement_pending_.exchange(false)) return;
     announcement_started_us_ = 0;
     tts_stop_pending_ = false;

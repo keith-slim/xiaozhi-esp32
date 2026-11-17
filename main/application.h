@@ -123,7 +123,6 @@ public:
     // Nonblocking: no network work under the StackChan LVGL lock.
     bool RequestAnnouncement(const char* kind, const char* text);
     bool IsAnnouncementActive() const { return announcement_pending_.load(); }
-    bool IsStartupAnnouncementActive() const { return startup_announcement_active_.load(); }
 
     
     /**
@@ -153,7 +152,6 @@ private:
     std::atomic<uint32_t> last_speech_subtitle_tick_ms_{0};
     bool tts_stop_pending_ = false;  // Stay in speaking state until actual queued PCM drains.
     std::atomic<bool> announcement_pending_{false};
-    std::atomic<bool> startup_announcement_active_{false}; // Only this type suppresses wake scene resets.
     int64_t announcement_started_us_ = 0; // main task only, bounded timeout
     bool announcement_subtitles_linger_ = false; // main task only
 

@@ -115,9 +115,10 @@ class StartupWakeWordHintTests(unittest.TestCase):
             class AudioService {
             public:
                 bool running = true;
+                bool playback_idle = true;
                 std::vector<std::string> words = {"Hi,ESP", "", "Hi,ESP", "Alexa"};
                 bool IsWakeWordRunning() const { return running; }
-                bool IsPlaybackIdle() const { return true; }
+                bool IsPlaybackIdle() const { return playback_idle; }
                 std::vector<std::string> GetWakeWords() const { return words; }
             };
             class Display {
@@ -259,6 +260,22 @@ class StartupWakeWordHintTests(unittest.TestCase):
                 assert(display->messages.size() == 1);
                 assert(display->messages[0].first == "startup_hint");
                 fallback.HideStartupWakeWordHint();
+                assert(display->messages.empty());
+
+                // The activation sound owns the decoder until it drains.
+                Application delayed;
+                delayed.pending_startup_wake_word_hint_ = true;
+                delayed.request_succeeds = true;
+                delayed.audio_service_.playback_idle = false;
+                delayed.ShowStartupWakeWordHint();
+                assert(delayed.pending_startup_wake_word_hint_);
+                assert(display->messages.empty());
+                advance_time(1000000);
+                delayed.ShowStartupWakeWordHint();
+                assert(delayed.pending_startup_wake_word_hint_);
+                delayed.audio_service_.playback_idle = true;
+                delayed.ShowStartupWakeWordHint();
+                assert(!delayed.pending_startup_wake_word_hint_);
                 assert(display->messages.empty());
                 display->startup_speech = false;
             }

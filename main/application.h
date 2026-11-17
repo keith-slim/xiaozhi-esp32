@@ -152,6 +152,7 @@ private:
     bool tts_stop_pending_ = false;  // Stay in speaking state until actual queued PCM drains.
     std::atomic<bool> announcement_pending_{false};
     int64_t announcement_started_us_ = 0; // main task only, bounded timeout
+    bool announcement_subtitles_linger_ = false; // main task only
 
     NotifyPlayer notify_player_;
     uint32_t notification_playback_id_ = 0;

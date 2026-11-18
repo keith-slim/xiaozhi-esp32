@@ -181,7 +181,9 @@ void AudioService::Start() {
             audio_service->OpusCodecTask();
             vTaskDelete(NULL);
         },
-        "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
+        // 24 KiB previously reserved; measured minimum free at idle was 16728 B.
+        // Keep 16 KiB (about 8 KiB headroom at idle) and verify under real Opus traffic.
+        "opus_codec", 2048 * 8, this, 2, &opus_codec_task_handle_);
     LogAudioMemory("after_opus_task");
 }
 

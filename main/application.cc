@@ -327,8 +327,8 @@ void Application::Run() {
             // A failed standalone request must not hold wake-up indefinitely.
             if (IsAnnouncementActive() && announcement_started_us_ &&
                 esp_timer_get_time() - announcement_started_us_ > 75000000) {
-                ESP_LOGW(TAG, "[SPEAK] timeout waiting for announcement");
-                FinishAnnouncement();
+                ESP_LOGW(TAG, "[SPEECH] kind=%s phase=timeout", AnnouncementTag(announcement_kind_.load()));
+                FinishAnnouncement("timeout");
             }
 
             // Print debug info every 10 seconds
@@ -697,7 +697,9 @@ void Application::InitializeProtocol() {
         Schedule([this]() {
             // Preserve ordering with queued TTS stop/playback events. Clearing
             // the flag on the network callback thread could re-enable listening.
-            if (announcement_kind_.exchange(AnnouncementKind::None) != AnnouncementKind::None) {
+            const AnnouncementKind interrupted = announcement_kind_.exchange(AnnouncementKind::None);
+            if (interrupted != AnnouncementKind::None) {
+                ESP_LOGW(TAG, "[SPEECH] kind=%s phase=transport_closed", AnnouncementTag(interrupted));
                 announcement_started_us_ = 0;
                 tts_stop_pending_ = false;
                 announcement_subtitles_linger_ = true;
@@ -705,6 +707,12 @@ void Application::InitializeProtocol() {
             auto display = Board::GetInstance().GetDisplay();
             if (!announcement_subtitles_linger_) display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
+            if (!wake_word_after_announcement_.empty()) {
+                std::string word = std::move(wake_word_after_announcement_);
+                wake_word_after_announcement_.clear();
+                ESP_LOGI(TAG, "[SPEECH] kind=wake_word phase=handoff_to_listening");
+                BeginWakeWordInvoke(word);
+            }
         });
     });
 
@@ -761,9 +769,14 @@ void Application::InitializeProtocol() {
             }
         } else if (strcmp(type->valuestring, "speak") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
-            if (cJSON_IsString(state) && strcmp(state->valuestring, "error") == 0) {
-                ESP_LOGW(TAG, "[SPEAK] server rejected announcement");
-                Schedule([this]() { FinishAnnouncement(); });
+            auto kind = cJSON_GetObjectItem(root, "kind");
+            if (cJSON_IsString(state)) {
+                ESP_LOGI(TAG, "[SPEECH] kind=%s phase=%s session=%s",
+                         cJSON_IsString(kind) ? kind->valuestring :
+                           AnnouncementTag(announcement_kind_.load()),
+                         state->valuestring, protocol_ ? protocol_->session_id().c_str() : "");
+                if (strcmp(state->valuestring, "error") == 0)
+                    Schedule([this]() { FinishAnnouncement("server_error"); });
             }
         } else if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
@@ -1036,6 +1049,16 @@ void Application::HandleWakeWordDetectedEvent() {
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
 
     if (state == kDeviceStateIdle) {
+        // Sleep-only S3 greeting: do not begin microphone capture until its
+        // dedicated text-only Live turn and PCM playback have completed.
+        if (wake_word_announcement_provider_) {
+            const std::string greeting = wake_word_announcement_provider_();
+            if (!greeting.empty() && RequestAnnouncement("wake_word", greeting.c_str())) {
+                wake_word_after_announcement_ = wake_word;
+                ESP_LOGI(TAG, "[SPEECH] kind=wake_word phase=queued_before_listening");
+                return;
+            }
+        }
         BeginWakeWordInvoke(wake_word);
     } else if (state == kDeviceStateNotifying) {
         StopNotification();
@@ -1390,6 +1413,21 @@ void Application::HandleNotificationFinished(uint32_t playback_id, bool success)
 }
 
 
+const char* Application::AnnouncementTag(AnnouncementKind kind) {
+    switch (kind) {
+    case AnnouncementKind::Touch: return "touch";
+    case AnnouncementKind::Test: return "test";
+    case AnnouncementKind::Startup: return "startup";
+    case AnnouncementKind::Morning: return "morning";
+    case AnnouncementKind::Bedtime: return "bedtime";
+    case AnnouncementKind::WakeWord: return "wake_word";
+    case AnnouncementKind::Timer: return "timer";
+    case AnnouncementKind::Snore: return "snore";
+    case AnnouncementKind::SleepTalk: return "sleep_talk";
+    default: return "none";
+    }
+}
+
 bool Application::RequestAnnouncement(const char* kind, const char* text) {
     // All standalone sources share one audio-transport admission gate.
     // Never let an announcement reset a decoder while a chime, sound effect,
@@ -1405,11 +1443,18 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
     if (std::strcmp(kind, "touch") == 0) requested = AnnouncementKind::Touch;
     else if (std::strcmp(kind, "test") == 0) requested = AnnouncementKind::Test;
     else if (std::strcmp(kind, "startup") == 0) requested = AnnouncementKind::Startup;
+    else if (std::strcmp(kind, "morning") == 0) requested = AnnouncementKind::Morning;
+    else if (std::strcmp(kind, "bedtime") == 0) requested = AnnouncementKind::Bedtime;
+    else if (std::strcmp(kind, "wake_word") == 0) requested = AnnouncementKind::WakeWord;
+    else if (std::strcmp(kind, "timer") == 0) requested = AnnouncementKind::Timer;
+    else if (std::strcmp(kind, "snore") == 0) requested = AnnouncementKind::Snore;
+    else if (std::strcmp(kind, "sleep_talk") == 0) requested = AnnouncementKind::SleepTalk;
     else return false;
 
     // One atomic admission operation protects every standalone speech source.
     AnnouncementKind expected = AnnouncementKind::None;
     if (!announcement_kind_.compare_exchange_strong(expected, requested)) return false;
+    ESP_LOGI(TAG, "[SPEECH] kind=%s phase=queued transport=ws12800", kind);
 
     Schedule([this, kind = std::string(kind), message = std::string(text)]() {
         if (!protocol_ || !is_websocket_protocol_ || GetDeviceState() != kDeviceStateIdle ||
@@ -1427,24 +1472,50 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
             }
             if ((!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel()) ||
                 !protocol_->SendAnnouncement(kind, message)) {
-                ESP_LOGW(TAG, "[SPEAK] cannot open/send announcement kind=%s", kind.c_str());
-                FinishAnnouncement();
+                ESP_LOGW(TAG, "[SPEECH] kind=%s phase=send_failed transport=ws12800", kind.c_str());
+                FinishAnnouncement("send_failed");
                 return;
             }
-            ESP_LOGI(TAG, "[SPEAK] sent on existing WebSocket kind=%s", kind.c_str());
+            ESP_LOGI(TAG, "[SPEECH] kind=%s phase=sent transport=ws12800 session=%s",
+                     kind.c_str(), protocol_->session_id().c_str());
         });
     });
     return true;
 }
 
-void Application::FinishAnnouncement() {
-    if (announcement_kind_.exchange(AnnouncementKind::None) == AnnouncementKind::None) return;
+void Application::FinishAnnouncement(const char* result) {
+    const auto completed = announcement_kind_.exchange(AnnouncementKind::None);
+    if (completed == AnnouncementKind::None) return;
+    ESP_LOGI(TAG, "[SPEECH] kind=%s phase=%s transport=ws12800",
+             AnnouncementTag(completed), result);
     announcement_started_us_ = 0;
     tts_stop_pending_ = false;
     announcement_subtitles_linger_ = true;
     if (protocol_) protocol_->CloseAudioChannel();
     if (GetDeviceState() != kDeviceStateIdle) SetDeviceState(kDeviceStateIdle);
-    ESP_LOGI(TAG, "[SPEAK] standalone announcement ended");
+    // If the WebSocket never opened, no OnAudioChannelClosed callback is
+    // guaranteed. Resume the original wake-word path in that fallback case.
+    if (!wake_word_after_announcement_.empty() && (!protocol_ || !protocol_->IsAudioChannelOpened())) {
+        std::string word = std::move(wake_word_after_announcement_);
+        wake_word_after_announcement_.clear();
+        Schedule([this, word]() {
+            if (GetDeviceState() == kDeviceStateIdle) BeginWakeWordInvoke(word);
+        });
+    }
+}
+
+void Application::CancelSleepAnnouncement() {
+    // Invoked by StackChan from its UI task. Only sleep sounds can be
+    // interrupted; never reset normal microphone conversations or greetings.
+    const auto kind = announcement_kind_.load();
+    if (kind != AnnouncementKind::Snore && kind != AnnouncementKind::SleepTalk) return;
+    Schedule([this]() {
+        const auto current = announcement_kind_.load();
+        if (current != AnnouncementKind::Snore && current != AnnouncementKind::SleepTalk) return;
+        if (protocol_ && protocol_->IsAudioChannelOpened())
+            protocol_->SendAbortSpeaking(kAbortReasonNone);
+        FinishAnnouncement("canceled");
+    });
 }
 
 void Application::Schedule(std::function<void()>&& callback) {

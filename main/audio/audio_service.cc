@@ -285,6 +285,14 @@ void AudioService::AudioInputTask() {
                  static_cast<unsigned long>(input_frames ? feed_total_us / input_frames : 0),
                  static_cast<unsigned long>(feed_max_us),
                  static_cast<unsigned long>(read_failures));
+        // Stack high-water marks are measured in bytes by ESP-IDF. Read only
+        // while the audio service is active; do not change task stack sizes.
+#if (INCLUDE_uxTaskGetStackHighWaterMark == 1)
+        ESP_LOGI(TAG, "[STACK_DIAG] audio_input_free=%u audio_output_free=%u opus_codec_free=%u",
+                 (unsigned)uxTaskGetStackHighWaterMark(nullptr),
+                 audio_output_task_handle_ ? (unsigned)uxTaskGetStackHighWaterMark(audio_output_task_handle_) : 0u,
+                 opus_codec_task_handle_ ? (unsigned)uxTaskGetStackHighWaterMark(opus_codec_task_handle_) : 0u);
+#endif
         input_frames = read_failures = read_max_us = feed_max_us = 0;
         read_total_us = feed_total_us = 0;
         timing_last_log_us = now;

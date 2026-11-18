@@ -134,6 +134,7 @@ public:
         wake_word_announcement_provider_ = std::move(provider);
     }
     void CancelSleepAnnouncement(); // Never interrupts an ordinary conversation.
+    uint8_t ActiveSleepAnnouncement() const; // 0=none, 1=snore, 2=sleep talk; only during TTS.
     bool IsAnnouncementActive() const { return announcement_kind_.load() != AnnouncementKind::None; }
     bool IsStartupAnnouncementActive() const { return announcement_kind_.load() == AnnouncementKind::Startup; }
 

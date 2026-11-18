@@ -1090,8 +1090,11 @@ void Application::HandleWakeWordDetectedEvent() {
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
 
-    if (state == kDeviceStateSpeaking && ActiveSleepAnnouncement() != 0 &&
-        wake_word_announcement_provider_) {
+    const auto active_kind = announcement_kind_.load();
+    const bool sleep_sound_connection =
+        (state == kDeviceStateConnecting || state == kDeviceStateSpeaking) &&
+        (active_kind == AnnouncementKind::Snore || active_kind == AnnouncementKind::SleepTalk);
+    if (sleep_sound_connection && wake_word_announcement_provider_) {
         // A real wake word during a standalone snore / dream must take
         // precedence. Preserve the detected word, stop only the sleep audio
         // and begin its greeting after playback and socket close.

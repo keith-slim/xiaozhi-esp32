@@ -274,6 +274,9 @@ void AudioService::AudioInputTask() {
     // a brief scheduling window periodically to prevent task WDT starvation
     // without adding a delay to every 10-ms audio frame.
     uint32_t frames_since_idle_yield = 0;
+    // Input engines read from this buffer without taking ownership. Reuse
+    // capacity across 10-ms frames instead of allocating on every read.
+    std::vector<int16_t> capture_data;
     int64_t timing_last_log_us = esp_timer_get_time();
     auto report_input_timing = [&]() {
         const int64_t now = esp_timer_get_time();
@@ -365,13 +368,12 @@ void AudioService::AudioInputTask() {
         /* Feed the selected audio engine */
         if (bits & (AS_EVENT_WAKE_WORD_RUNNING | AS_EVENT_AUDIO_PROCESSOR_RUNNING)) {
             int samples = 160;  // 10ms
-            std::vector<int16_t> data;
             const int64_t read_begin = esp_timer_get_time();
-            const bool read_ok = ReadAudioData(data, 16000, samples);
+            const bool read_ok = ReadAudioData(capture_data, 16000, samples);
             const int64_t read_end = esp_timer_get_time();
             if (read_ok) {
                 const int64_t feed_begin = read_end;
-                audio_engine_->Feed(std::move(data));
+                audio_engine_->Feed(std::move(capture_data));
                 const int64_t feed_end = esp_timer_get_time();
                 const auto read_us = static_cast<uint32_t>(read_end - read_begin);
                 const auto feed_us = static_cast<uint32_t>(feed_end - feed_begin);

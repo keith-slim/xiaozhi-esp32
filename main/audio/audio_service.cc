@@ -673,7 +673,8 @@ void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
         esp_opus_dec_close(opus_decoder_);
         opus_decoder_ = nullptr;
     }
-    decoder_lock.unlock();
+    // ResetDecoder() runs on the application task. Keep it from observing
+    // a half-reinitialized decoder during a stream sample-rate change.
     esp_opus_dec_cfg_t opus_dec_cfg = OPUS_DEC_CFG(sample_rate, frame_duration);
     auto ret = esp_opus_dec_open(&opus_dec_cfg, sizeof(esp_opus_dec_cfg_t), &opus_decoder_);
     if (opus_decoder_ == nullptr) {
@@ -683,6 +684,7 @@ void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
     decoder_sample_rate_ = sample_rate;
     decoder_duration_ms_ = frame_duration;
     decoder_frame_size_ = decoder_sample_rate_ / 1000 * frame_duration;
+    decoder_lock.unlock();
 
     auto codec = Board::GetInstance().GetAudioCodec();
     // The old converter was retained when the next stream already matched

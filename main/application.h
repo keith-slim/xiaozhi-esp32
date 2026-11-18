@@ -171,6 +171,7 @@ private:
     bool announcement_subtitles_linger_ = false; // main task only
     std::function<std::string()> wake_word_announcement_provider_;
     std::string wake_word_after_announcement_; // Main-task only, resumed after socket close.
+    std::string pending_wake_word_greeting_; // Used when wake word interrupts snore/sleep talk.
 
     NotifyPlayer notify_player_;
     uint32_t notification_playback_id_ = 0;

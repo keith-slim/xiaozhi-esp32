@@ -519,10 +519,11 @@ void Application::ActivationTask() {
     // Create OTA object for activation process
     ota_ = std::make_unique<Ota>();
 
-    // Check for new assets version
+    // Apply installed assets; do not fetch or install automatic updates.
     CheckAssetsVersion();
 
-    // Check for new firmware version
+    // The self-hosted OTA endpoint is still needed to provision the WebSocket
+    // URL and activation data, but firmware updates are never automatic.
     CheckNewVersion();
 
     // Initialize the protocol
@@ -548,10 +549,11 @@ void Application::CheckAssetsVersion() {
         return;
     }
 
+    // Self-hosted operation: do not consume a pending download_url on boot.
+    // Assets::Apply below is still required for the installed UI/voice assets.
+    /* Legacy automatic download intentionally disabled.
     Settings settings("assets", true);
-    // Check if there is a new assets need to be downloaded
     std::string download_url = settings.GetString("download_url");
-
     if (!download_url.empty()) {
         settings.EraseKey("download_url");
 
@@ -586,7 +588,8 @@ void Application::CheckAssetsVersion() {
         }
     }
 
-    // Apply assets
+    */
+    // Apply existing assets without checking for or downloading updates.
     assets.Apply();
     display->SetChatMessage("system", "");
     // "robot_2" is declared only by a board shipping its own pack: esp-vocat maps it to
@@ -608,7 +611,7 @@ void Application::CheckNewVersion() {
     auto& board = Board::GetInstance();
     while (true) {
         auto display = board.GetDisplay();
-        display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
+        display->SetStatus(Lang::Strings::ACTIVATION);
 
         auto check = ota_->CheckVersion();
         if (!check) {
@@ -651,14 +654,10 @@ void Application::CheckNewVersion() {
         retry_count = 0;
         retry_delay = 10;  // Reset retry delay
 
-        if (ota_->HasNewVersion()) {
-            if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
-                return;  // This line will never be reached after reboot
-            }
-            // If upgrade failed, continue to normal operation
-        }
-
-        // No new version, mark the current version as valid
+        // The endpoint response also provisions the WebSocket target.
+        // Never auto-install firmware even if a version/force flag is returned.
+        // Preserve partition confirmation to avoid bootloader rollback.
+        // Mark the current version as valid
         ota_->MarkCurrentVersionValid();
         if (ota_->RequiresAppBinding()) {
             GetHAL().requestAppSetup();

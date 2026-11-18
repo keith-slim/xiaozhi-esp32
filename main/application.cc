@@ -15,6 +15,7 @@
 
 #include <driver/gpio.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <arpa/inet.h>
 #include <cJSON.h>
 #include <algorithm>
@@ -22,6 +23,16 @@
 #include <limits>
 
 #define TAG "Application"
+
+// Diagnostic-only: internal heap, largest contiguous allocation and PSRAM.
+static void LogMemorySnapshot(const char* stage) {
+    ESP_LOGI(TAG, "[MEM_DIAG] %s internal=%u largest=%u min_internal=%u psram=%u",
+             stage,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+}
 
 Application::Application() : notify_player_(audio_service_) {
     event_group_ = xEventGroupCreate();
@@ -82,9 +93,12 @@ void Application::Initialize() {
     display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
 
     // Setup the audio service
+    LogMemorySnapshot("before_audio_init");
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
+    LogMemorySnapshot("after_audio_init");
     audio_service_.Start();
+    LogMemorySnapshot("after_audio_tasks");
     ESP_LOGI(TAG, "After board/audio init");
     SystemInfo::PrintHeapStats();
 
@@ -466,6 +480,7 @@ void Application::MaybeReconnectAudioChannel() {
 void Application::HandleActivationDoneEvent() {
     ESP_LOGI(TAG, "Activation done");
 
+    LogMemorySnapshot("activation_done");
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
 
@@ -488,6 +503,7 @@ void Application::HandleActivationDoneEvent() {
 
     // Release OTA object after activation is complete
     ota_.reset();
+    LogMemorySnapshot("after_ota_release");
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 
@@ -1346,6 +1362,7 @@ void Application::ShowStartupWakeWordHint() {
     }
     message.replace(placeholder, 2, words);
     ESP_LOGI(TAG, "Startup wake word hint: %s", message.c_str());
+    LogMemorySnapshot("before_startup_announcement");
     // Use the same bounded 12800 announcement API as touch wake and Web test.
     // The server owns its audio-synced captions; do not duplicate them locally.
     if (dedicated_startup && RequestAnnouncement("startup", message.c_str())) {
@@ -1539,12 +1556,15 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
                 announcement_kind_.store(AnnouncementKind::None);
                 return;
             }
+            LogMemorySnapshot("before_announcement_ws");
             if ((!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel()) ||
                 !protocol_->SendAnnouncement(kind, message)) {
+                LogMemorySnapshot("announcement_ws_failed");
                 ESP_LOGW(TAG, "[SPEECH] kind=%s phase=send_failed transport=ws12800", kind.c_str());
                 FinishAnnouncement("send_failed");
                 return;
             }
+            LogMemorySnapshot("announcement_ws_sent");
             ESP_LOGI(TAG, "[SPEECH] kind=%s phase=sent transport=ws12800 session=%s",
                      kind.c_str(), protocol_->session_id().c_str());
         });

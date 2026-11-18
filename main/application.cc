@@ -324,9 +324,30 @@ void Application::Run() {
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
             MaybeReconnectAudioChannel();
+            // A wake word can interrupt a sleep sound already playing through
+            // the single audio decoder. Cancel and fully close that socket
+            // BEFORE starting the wake-word greeting on a new Live turn.
+            if (!pending_wake_word_greeting_.empty()) {
+                if (!IsAnnouncementActive() && GetDeviceState() == kDeviceStateIdle &&
+                    (!protocol_ || !protocol_->IsAudioChannelOpened()) &&
+                    audio_service_.IsPlaybackIdle() &&
+                    RequestAnnouncement("wake_word", pending_wake_word_greeting_.c_str())) {
+                    ESP_LOGI(TAG, "[SPEECH] kind=wake_word phase=queued_after_sleep_sound");
+                    pending_wake_word_greeting_.clear();
+                    pending_wake_word_since_us_ = 0;
+                } else if (pending_wake_word_since_us_ &&
+                           esp_timer_get_time() - pending_wake_word_since_us_ > 15000000) {
+                    ESP_LOGW(TAG, "[SPEECH] kind=wake_word phase=greeting_retry_timeout");
+                    pending_wake_word_greeting_.clear();
+                    pending_wake_word_since_us_ = 0;
+                    // Do not interrupt another user's conversation. The
+                    // original wake-word path resumes when genuinely idle.
+                }
+            }
             // Voice-first wake follows the regular listening path only after
             // the announcement has ended AND its socket is fully closed.
-            if (!wake_word_after_announcement_.empty() && !IsAnnouncementActive()) {
+            if (pending_wake_word_greeting_.empty() &&
+                !wake_word_after_announcement_.empty() && !IsAnnouncementActive()) {
                 if (GetDeviceState() == kDeviceStateIdle &&
                     (!protocol_ || !protocol_->IsAudioChannelOpened())) {
                     std::string word = std::move(wake_word_after_announcement_);
@@ -1068,6 +1089,22 @@ void Application::HandleWakeWordDetectedEvent() {
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
+
+    if (state == kDeviceStateSpeaking && ActiveSleepAnnouncement() != 0 &&
+        wake_word_announcement_provider_) {
+        // A real wake word during a standalone snore / dream must take
+        // precedence. Preserve the detected word, stop only the sleep audio
+        // and begin its greeting after playback and socket close.
+        const std::string greeting = wake_word_announcement_provider_();
+        if (!greeting.empty()) {
+            pending_wake_word_greeting_ = greeting;
+            pending_wake_word_since_us_ = esp_timer_get_time();
+            wake_word_after_announcement_ = wake_word;
+            ESP_LOGI(TAG, "[SPEECH] kind=wake_word phase=interrupt_sleep_sound");
+            CancelSleepAnnouncement();
+            return;
+        }
+    }
 
     if (state == kDeviceStateIdle) {
         // Sleep-only S3 greeting: do not begin microphone capture until its

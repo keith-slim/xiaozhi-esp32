@@ -21,6 +21,13 @@
 #include "blufi.h"
 #endif
 
+#if CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+// Optional StackChan-specific IP policy. Other xiaozhi boards retain their
+// original DHCP behavior without requiring StackChan to be linked.
+extern "C" esp_err_t stackchan_apply_saved_station_ip(const char* ssid)
+    __attribute__((weak));
+#endif
+
 static const char *TAG = "WifiBoard";
 
 // Connection timeout in seconds
@@ -76,6 +83,16 @@ void WifiBoard::StartNetwork() {
                 OnNetworkEvent(NetworkEvent::Scanning);
                 break;
             case WifiEvent::Connecting:
+#if CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+                // Called before esp_wifi_connect() for each selected SSID.
+                if (stackchan_apply_saved_station_ip) {
+                    const esp_err_t ip_err = stackchan_apply_saved_station_ip(data.c_str());
+                    if (ip_err != ESP_OK) {
+                        ESP_LOGE(TAG, "SSID IPv4 preparation failed: %s",
+                                 esp_err_to_name(ip_err));
+                    }
+                }
+#endif
                 OnNetworkEvent(NetworkEvent::Connecting, data);
                 break;
             case WifiEvent::Connected:

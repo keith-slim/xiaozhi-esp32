@@ -1,5 +1,6 @@
 #include "audio_service.h"
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <algorithm>
 #include <cstring>
 
@@ -26,6 +27,13 @@
 
 #define TAG "AudioService"
 
+static void LogAudioMemory(const char* stage) {
+    ESP_LOGI(TAG, "[MEM_DIAG] %s internal=%u largest=%u psram=%u", stage,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+}
+
 AudioService::AudioService() { event_group_ = xEventGroupCreate(); }
 
 AudioService::~AudioService() {
@@ -48,7 +56,9 @@ AudioService::~AudioService() {
 
 void AudioService::Initialize(AudioCodec* codec) {
     codec_ = codec;
+    LogAudioMemory("before_codec_start");
     codec_->Start();
+    LogAudioMemory("after_codec_start");
 
     esp_opus_dec_cfg_t opus_dec_cfg =
         OPUS_DEC_CFG(codec->output_sample_rate(), OPUS_FRAME_DURATION_MS);
@@ -60,6 +70,7 @@ void AudioService::Initialize(AudioCodec* codec) {
         decoder_duration_ms_ = OPUS_FRAME_DURATION_MS;
         decoder_frame_size_ = decoder_sample_rate_ / 1000 * OPUS_FRAME_DURATION_MS;
     }
+    LogAudioMemory("after_opus_decoder");
     esp_opus_enc_config_t opus_enc_cfg = AS_OPUS_ENC_CONFIG();
     ret = esp_opus_enc_open(&opus_enc_cfg, sizeof(esp_opus_enc_config_t), &opus_encoder_);
     if (opus_encoder_ == nullptr) {
@@ -71,6 +82,7 @@ void AudioService::Initialize(AudioCodec* codec) {
         encoder_frame_size_ = encoder_frame_size_ / sizeof(int16_t);
     }
 
+    LogAudioMemory("after_opus_encoder");
     if (codec->input_sample_rate() != 16000) {
         esp_ae_rate_cvt_cfg_t input_resampler_cfg = RATE_CVT_CFG(
             codec->input_sample_rate(), ESP_AUDIO_SAMPLE_RATE_16K, codec->input_channels());
@@ -161,6 +173,7 @@ void AudioService::Start() {
         "audio_output", 2048, this, 4, &audio_output_task_handle_);
 #endif
 
+    LogAudioMemory("before_opus_task");
     /* Start the opus codec task */
     xTaskCreate(
         [](void* arg) {
@@ -169,6 +182,7 @@ void AudioService::Start() {
             vTaskDelete(NULL);
         },
         "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
+    LogAudioMemory("after_opus_task");
 }
 
 void AudioService::Stop() {

@@ -171,6 +171,7 @@ private:
     bool announcement_subtitles_linger_ = false; // main task only
     std::function<std::string()> wake_word_announcement_provider_;
     std::string wake_word_after_announcement_; // Main-task only, resumed after socket close.
+    bool wake_word_handoff_pending_ = false; // An empty recognized word must still resume listening.
     std::string pending_wake_word_greeting_; // Used when wake word interrupts snore/sleep talk.
     int64_t pending_wake_word_since_us_ = 0; // Bounded fallback if the greeting cannot start.
 

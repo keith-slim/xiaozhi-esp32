@@ -1096,20 +1096,20 @@ void Application::HandleWakeWordDetectedEvent() {
     const bool sleep_sound_connection =
         (state == kDeviceStateConnecting || state == kDeviceStateSpeaking) &&
         (active_kind == AnnouncementKind::Snore || active_kind == AnnouncementKind::SleepTalk);
-    if (sleep_sound_connection && wake_word_announcement_provider_) {
-        // A real wake word during a standalone snore / dream must take
-        // precedence. Preserve the detected word, stop only the sleep audio
-        // and begin its greeting after playback and socket close.
-        const std::string greeting = wake_word_announcement_provider_();
-        if (!greeting.empty()) {
-            pending_wake_word_greeting_ = greeting;
-            pending_wake_word_since_us_ = esp_timer_get_time();
-            wake_word_after_announcement_ = wake_word;
-            wake_word_handoff_pending_ = true;
-            ESP_LOGI(TAG, "[SPEECH] kind=wake_word phase=interrupt_sleep_sound");
-            CancelSleepAnnouncement();
-            return;
-        }
+    if (sleep_sound_connection) {
+        // The wake word takes precedence even if its configured greeting is
+        // blank or temporarily unavailable: it must still reach listening.
+        // Never apply this special interruption to normal conversations.
+        const std::string greeting = wake_word_announcement_provider_
+            ? wake_word_announcement_provider_() : std::string{};
+        pending_wake_word_greeting_ = greeting;
+        pending_wake_word_since_us_ = greeting.empty() ? 0 : esp_timer_get_time();
+        wake_word_after_announcement_ = wake_word;
+        wake_word_handoff_pending_ = true;
+        ESP_LOGI(TAG, "[SPEECH] kind=wake_word phase=interrupt_sleep_sound greeting=%s",
+                 greeting.empty() ? "skipped" : "pending");
+        CancelSleepAnnouncement();
+        return;
     }
 
     if (state == kDeviceStateIdle) {

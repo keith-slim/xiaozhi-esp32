@@ -809,10 +809,12 @@ void Application::InitializeProtocol() {
             auto state = cJSON_GetObjectItem(root, "state");
             auto kind = cJSON_GetObjectItem(root, "kind");
             if (cJSON_IsString(state)) {
+                const char* phase = strcmp(state->valuestring, "completed") == 0 ?
+                    "server_stream_completed" : state->valuestring;
                 ESP_LOGI(TAG, "[SPEECH] kind=%s phase=%s session=%s",
                          cJSON_IsString(kind) ? kind->valuestring :
                            AnnouncementTag(announcement_kind_.load()),
-                         state->valuestring, protocol_ ? protocol_->session_id().c_str() : "");
+                         phase, protocol_ ? protocol_->session_id().c_str() : "");
                 if (strcmp(state->valuestring, "error") == 0)
                     Schedule([this]() { FinishAnnouncement("server_error"); });
             }
@@ -1554,7 +1556,8 @@ void Application::FinishAnnouncement(const char* result) {
     const auto completed = announcement_kind_.exchange(AnnouncementKind::None);
     if (completed == AnnouncementKind::None) return;
     ESP_LOGI(TAG, "[SPEECH] kind=%s phase=%s transport=ws12800",
-             AnnouncementTag(completed), result);
+             AnnouncementTag(completed),
+             std::strcmp(result, "completed") == 0 ? "playback_completed" : result);
     announcement_started_us_ = 0;
     tts_stop_pending_ = false;
     announcement_subtitles_linger_ = true;

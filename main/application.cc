@@ -324,6 +324,22 @@ void Application::Run() {
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
             MaybeReconnectAudioChannel();
+            // Voice-first wake follows the regular listening path only after
+            // the announcement has ended AND its socket is fully closed.
+            if (!wake_word_after_announcement_.empty() && !IsAnnouncementActive()) {
+                if (GetDeviceState() == kDeviceStateIdle &&
+                    (!protocol_ || !protocol_->IsAudioChannelOpened())) {
+                    std::string word = std::move(wake_word_after_announcement_);
+                    wake_word_after_announcement_.clear();
+                    ESP_LOGI(TAG, "[SPEECH] kind=wake_word phase=handoff_to_listening");
+                    BeginWakeWordInvoke(word);
+                } else if (GetDeviceState() == kDeviceStateListening ||
+                           GetDeviceState() == kDeviceStateSpeaking) {
+                    // User initiated another dialogue; do not replay the
+                    // already-consumed wake word after that dialogue ends.
+                    wake_word_after_announcement_.clear();
+                }
+            }
             // A failed standalone request must not hold wake-up indefinitely.
             if (IsAnnouncementActive() && announcement_started_us_ &&
                 esp_timer_get_time() - announcement_started_us_ > 75000000) {
@@ -707,12 +723,9 @@ void Application::InitializeProtocol() {
             auto display = Board::GetInstance().GetDisplay();
             if (!announcement_subtitles_linger_) display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
-            if (!wake_word_after_announcement_.empty()) {
-                std::string word = std::move(wake_word_after_announcement_);
-                wake_word_after_announcement_.clear();
-                ESP_LOGI(TAG, "[SPEECH] kind=wake_word phase=handoff_to_listening");
-                BeginWakeWordInvoke(word);
-            }
+            // A prior socket close may be delivered after the queued UI
+            // events. Resume the wake-word only from the clock tick, after
+            // all old transport callbacks have settled.
         });
     });
 
@@ -1501,15 +1514,8 @@ void Application::FinishAnnouncement(const char* result) {
     announcement_subtitles_linger_ = true;
     if (protocol_) protocol_->CloseAudioChannel();
     if (GetDeviceState() != kDeviceStateIdle) SetDeviceState(kDeviceStateIdle);
-    // If the WebSocket never opened, no OnAudioChannelClosed callback is
-    // guaranteed. Resume the original wake-word path in that fallback case.
-    if (!wake_word_after_announcement_.empty() && (!protocol_ || !protocol_->IsAudioChannelOpened())) {
-        std::string word = std::move(wake_word_after_announcement_);
-        wake_word_after_announcement_.clear();
-        Schedule([this, word]() {
-            if (GetDeviceState() == kDeviceStateIdle) BeginWakeWordInvoke(word);
-        });
-    }
+    // Wake-word handoff is deferred to the clock tick so no late close
+    // callback from this socket can reset the newly opened conversation.
 }
 
 uint8_t Application::ActiveSleepAnnouncement() const {

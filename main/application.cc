@@ -783,6 +783,14 @@ void Application::InitializeProtocol() {
             if (!cJSON_IsString(state)) {
                 return;
             }
+            auto speech_kind = cJSON_GetObjectItem(root, "kind");
+            const char* kind_tag = cJSON_IsString(speech_kind) ?
+                                   speech_kind->valuestring : "conversation";
+            if (strcmp(state->valuestring, "start") == 0 ||
+                strcmp(state->valuestring, "stop") == 0) {
+                ESP_LOGI(TAG, "[SPEECH] kind=%s phase=tts_%s transport=ws12800",
+                         kind_tag, state->valuestring);
+            }
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
                     aborted_ = false;
@@ -1502,6 +1510,13 @@ void Application::FinishAnnouncement(const char* result) {
             if (GetDeviceState() == kDeviceStateIdle) BeginWakeWordInvoke(word);
         });
     }
+}
+
+uint8_t Application::ActiveSleepAnnouncement() const {
+    if (GetDeviceState() != kDeviceStateSpeaking) return 0;
+    const auto kind = announcement_kind_.load();
+    return kind == AnnouncementKind::Snore ? 1 :
+           kind == AnnouncementKind::SleepTalk ? 2 : 0;
 }
 
 void Application::CancelSleepAnnouncement() {

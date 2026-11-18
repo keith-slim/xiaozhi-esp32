@@ -349,7 +349,8 @@ void Application::Run() {
             if (pending_wake_word_greeting_.empty() &&
                 wake_word_handoff_pending_ && !IsAnnouncementActive()) {
                 if (GetDeviceState() == kDeviceStateIdle &&
-                    (!protocol_ || !protocol_->IsAudioChannelOpened())) {
+                    (!protocol_ || !protocol_->IsAudioChannelOpened()) &&
+                    audio_service_.IsPlaybackIdle()) {
                     std::string word = std::move(wake_word_after_announcement_);
                     wake_word_after_announcement_.clear();
                     wake_word_handoff_pending_ = false;
@@ -430,6 +431,7 @@ void Application::HandleNetworkDisconnectedEvent() {
 
 void Application::MaybeReconnectAudioChannel() {
     if (!auto_reconnect_pending_ || !is_websocket_protocol_ || !protocol_ ||
+        wake_word_handoff_pending_ || IsAnnouncementActive() ||
         GetDeviceState() != kDeviceStateIdle || esp_timer_get_time() < auto_reconnect_due_us_) {
         return;
     }

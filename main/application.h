@@ -172,6 +172,7 @@ private:
     std::function<std::string()> wake_word_announcement_provider_;
     std::string wake_word_after_announcement_; // Main-task only, resumed after socket close.
     std::string pending_wake_word_greeting_; // Used when wake word interrupts snore/sleep talk.
+    int64_t pending_wake_word_since_us_ = 0; // Bounded fallback if the greeting cannot start.
 
     NotifyPlayer notify_player_;
     uint32_t notification_playback_id_ = 0;

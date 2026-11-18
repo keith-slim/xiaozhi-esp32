@@ -1535,6 +1535,7 @@ void Application::CancelSleepAnnouncement() {
         if (current != AnnouncementKind::Snore && current != AnnouncementKind::SleepTalk) return;
         if (protocol_ && protocol_->IsAudioChannelOpened())
             protocol_->SendAbortSpeaking(kAbortReasonNone);
+        audio_service_.ResetDecoder(); // Only the standalone sleep sound.
         FinishAnnouncement("canceled");
     });
 }

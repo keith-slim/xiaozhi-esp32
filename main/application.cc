@@ -551,44 +551,6 @@ void Application::CheckAssetsVersion() {
 
     // Self-hosted operation: do not consume a pending download_url on boot.
     // Assets::Apply below is still required for the installed UI/voice assets.
-    /* Legacy automatic download intentionally disabled.
-    Settings settings("assets", true);
-    std::string download_url = settings.GetString("download_url");
-    if (!download_url.empty()) {
-        settings.EraseKey("download_url");
-
-        char message[256];
-        snprintf(message, sizeof(message), Lang::Strings::FOUND_NEW_ASSETS, download_url.c_str());
-        Alert(Lang::Strings::LOADING_ASSETS, message, "cloud_download", Lang::Sounds::OGG_UPGRADE);
-
-        // Wait for the audio service to be idle for 3 seconds
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        SetDeviceState(kDeviceStateUpgrading);
-        board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
-        display->SetChatMessage("system", Lang::Strings::PLEASE_WAIT);
-
-        bool success =
-            assets.Download(download_url, [this, display](int progress, size_t speed) -> void {
-                char buffer[32];
-                snprintf(buffer, sizeof(buffer), "%d%% %uKB/s", progress, speed / 1024);
-                Schedule([display, message = std::string(buffer)]() {
-                    display->SetChatMessage("system", message.c_str());
-                });
-            });
-
-        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-
-        if (!success) {
-            Alert(Lang::Strings::ERROR, Lang::Strings::DOWNLOAD_ASSETS_FAILED, "cancel",
-                  Lang::Sounds::OGG_EXCLAMATION);
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            SetDeviceState(kDeviceStateActivating);
-            return;
-        }
-    }
-
-    */
     // Apply existing assets without checking for or downloading updates.
     assets.Apply();
     display->SetChatMessage("system", "");

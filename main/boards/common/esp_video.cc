@@ -1064,7 +1064,9 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
         drain_jpeg_queue();
         return std::unexpected("Could not create the image HTTP client");
     }
-    http->SetTimeout(15000);
+    // The local vision gateway waits for Gemini image analysis before replying.
+    // This tool runs in a dedicated MCP worker, not the UI/audio event loop.
+    http->SetTimeout(45000);
     // 构造multipart/form-data请求体
     std::string boundary = "----ESP32_CAMERA_BOUNDARY";
 
@@ -1177,7 +1179,7 @@ std::expected<std::string, std::string> EspVideo::Explain(const std::string& que
     }
 
     std::string result;
-    const int64_t deadline = esp_timer_get_time() + 30000000;
+    const int64_t deadline = esp_timer_get_time() + 45000000;
     char buffer[512];
     while (esp_timer_get_time() < deadline) {
         const auto count = http->Read(buffer, sizeof(buffer));

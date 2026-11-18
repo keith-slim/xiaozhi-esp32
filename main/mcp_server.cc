@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iterator>
+#include <new>
 #include <optional>
 
 #include "application.h"
@@ -633,10 +634,11 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         }
     }
 
-    // Use main thread to call the tool
-    auto& app = Application::GetInstance();
-    app.Schedule([this, id, tool, arguments = std::move(arguments),
-                  response_sender = std::move(response_sender)]() {
+    // The camera uses a synchronous JPEG encoder and a long HTTP request.
+    // Never execute that tool on Application's main event loop: it would
+    // stall WebSocket reception, audio state changes and display updates.
+    auto run_tool = [this, id, tool, arguments = std::move(arguments),
+                     response_sender = std::move(response_sender)]() {
         auto result = tool->Call(arguments);
         if (!result) {
             ESP_LOGE(TAG, "tools/call: %s", result.error().c_str());
@@ -644,5 +646,29 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
             return;
         }
         ReplyResult(id, *result, response_sender);
-    });
+    };
+
+    if (tool_name == "self.camera.take_photo") {
+        using PhotoTask = std::function<void()>;
+        auto* task = new (std::nothrow) PhotoTask(std::move(run_tool));
+        if (task == nullptr) {
+            ReplyError(id, -32000, "No memory for camera task", response_sender);
+            return;
+        }
+        const BaseType_t created = xTaskCreate([](void* arg) {
+            {
+                std::unique_ptr<PhotoTask> operation(static_cast<PhotoTask*>(arg));
+                (*operation)();
+            }
+            vTaskDelete(nullptr);
+        }, "mcp_photo", 12288, task, 3, nullptr);
+        if (created != pdPASS) {
+            delete task;
+            ReplyError(id, -32000, "Could not start camera task", response_sender);
+        }
+        return;
+    }
+
+    // All other MCP tools keep their original main-thread behaviour.
+    Application::GetInstance().Schedule(std::move(run_tool));
 }

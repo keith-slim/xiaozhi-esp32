@@ -202,7 +202,7 @@ private:
     void HandleWakeWordDetectedEvent();
     void ContinueOpenAudioChannel(ListeningMode mode);
     void MaybeReconnectAudioChannel();
-    void FinishAnnouncement();
+    void FinishAnnouncement(const char* result = "completed");
     static const char* AnnouncementTag(AnnouncementKind kind);
     void BeginWakeWordInvoke(const std::string& wake_word);
     void ContinueWakeWordInvoke(const std::string& wake_word);

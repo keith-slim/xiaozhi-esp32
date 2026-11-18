@@ -347,11 +347,12 @@ void Application::Run() {
             // Voice-first wake follows the regular listening path only after
             // the announcement has ended AND its socket is fully closed.
             if (pending_wake_word_greeting_.empty() &&
-                !wake_word_after_announcement_.empty() && !IsAnnouncementActive()) {
+                wake_word_handoff_pending_ && !IsAnnouncementActive()) {
                 if (GetDeviceState() == kDeviceStateIdle &&
                     (!protocol_ || !protocol_->IsAudioChannelOpened())) {
                     std::string word = std::move(wake_word_after_announcement_);
                     wake_word_after_announcement_.clear();
+                    wake_word_handoff_pending_ = false;
                     ESP_LOGI(TAG, "[SPEECH] kind=wake_word phase=handoff_to_listening");
                     BeginWakeWordInvoke(word);
                 } else if (GetDeviceState() == kDeviceStateListening ||
@@ -359,6 +360,7 @@ void Application::Run() {
                     // User initiated another dialogue; do not replay the
                     // already-consumed wake word after that dialogue ends.
                     wake_word_after_announcement_.clear();
+                    wake_word_handoff_pending_ = false;
                 }
             }
             // A failed standalone request must not hold wake-up indefinitely.
@@ -1103,6 +1105,7 @@ void Application::HandleWakeWordDetectedEvent() {
             pending_wake_word_greeting_ = greeting;
             pending_wake_word_since_us_ = esp_timer_get_time();
             wake_word_after_announcement_ = wake_word;
+            wake_word_handoff_pending_ = true;
             ESP_LOGI(TAG, "[SPEECH] kind=wake_word phase=interrupt_sleep_sound");
             CancelSleepAnnouncement();
             return;
@@ -1116,6 +1119,7 @@ void Application::HandleWakeWordDetectedEvent() {
             const std::string greeting = wake_word_announcement_provider_();
             if (!greeting.empty() && RequestAnnouncement("wake_word", greeting.c_str())) {
                 wake_word_after_announcement_ = wake_word;
+                wake_word_handoff_pending_ = true;
                 ESP_LOGI(TAG, "[SPEECH] kind=wake_word phase=queued_before_listening");
                 return;
             }

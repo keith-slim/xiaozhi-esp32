@@ -136,37 +136,45 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
 
     websocket_->OnData([this, generation, intentional_close](const char* data, size_t len, bool binary) {
+        if (generation != websocket_generation_.load()) return;
         if (binary) {
             if (on_incoming_audio_ != nullptr) {
+                // Validate the framing before constructing a PCM/Opus packet.
+                // A truncated WebSocket frame must never read beyond 'len'.
+                const uint8_t* payload = reinterpret_cast<const uint8_t*>(data);
+                size_t payload_length = len;
+                uint32_t timestamp = 0;
                 if (version_ == 2) {
-                    BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
-                    bp2->version = ntohs(bp2->version);
-                    bp2->type = ntohs(bp2->type);
-                    bp2->timestamp = ntohl(bp2->timestamp);
-                    bp2->payload_size = ntohl(bp2->payload_size);
-                    auto payload = (uint8_t*)bp2->payload;
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = bp2->timestamp,
-                        .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)}));
+                    if (len < sizeof(BinaryProtocol2)) {
+                        ESP_LOGW(TAG, "Truncated protocol-v2 audio header: %u bytes", (unsigned)len);
+                        return;
+                    }
+                    const auto* header = reinterpret_cast<const BinaryProtocol2*>(data);
+                    payload_length = ntohl(header->payload_size);
+                    if (payload_length > len - sizeof(BinaryProtocol2)) {
+                        ESP_LOGW(TAG, "Invalid protocol-v2 audio payload length");
+                        return;
+                    }
+                    payload = header->payload;
+                    timestamp = ntohl(header->timestamp);
                 } else if (version_ == 3) {
-                    BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
-                    bp3->type = bp3->type;
-                    bp3->payload_size = ntohs(bp3->payload_size);
-                    auto payload = (uint8_t*)bp3->payload;
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = 0,
-                        .payload = std::vector<uint8_t>(payload, payload + bp3->payload_size)}));
-                } else {
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = 0,
-                        .payload = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len)}));
+                    if (len < sizeof(BinaryProtocol3)) {
+                        ESP_LOGW(TAG, "Truncated protocol-v3 audio header: %u bytes", (unsigned)len);
+                        return;
+                    }
+                    const auto* header = reinterpret_cast<const BinaryProtocol3*>(data);
+                    payload_length = ntohs(header->payload_size);
+                    if (payload_length > len - sizeof(BinaryProtocol3)) {
+                        ESP_LOGW(TAG, "Invalid protocol-v3 audio payload length");
+                        return;
+                    }
+                    payload = header->payload;
                 }
+                on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+                    .sample_rate = server_sample_rate_,
+                    .frame_duration = server_frame_duration_,
+                    .timestamp = timestamp,
+                    .payload = std::vector<uint8_t>(payload, payload + payload_length)}));
             }
         } else {
             // Parse JSON data

@@ -435,6 +435,10 @@ void AfeAudioEngine::ProcessingTask() {
                  static_cast<unsigned long>(process_max_us),
                  static_cast<unsigned long>(fetch_frames),
                  static_cast<unsigned long>(fetch_errors));
+#if (INCLUDE_uxTaskGetStackHighWaterMark == 1)
+        ESP_LOGI(TAG, "[STACK_DIAG] audio_afe_free=%u",
+                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+#endif
         fetch_total_us = process_total_us = 0;
         fetch_max_us = process_max_us = fetch_frames = fetch_errors = 0;
         timing_last_log_us = now;

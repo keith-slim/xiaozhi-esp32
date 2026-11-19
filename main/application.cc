@@ -1133,8 +1133,12 @@ void Application::HandleWakeWordDetectedEvent() {
 }
 
 void Application::BeginWakeWordInvoke(const std::string& wake_word) {
-    // Must run in the main task with the device in idle state
+    // Must run in the main task with the device in idle state.
+    // The encoder's PSRAM task stack (24 KiB for WakeNet) is only needed
+    // when the captured wake-word audio is actually sent to the server.
+#if CONFIG_SEND_WAKE_WORD_DATA
     audio_service_.EncodeWakeWord();
+#endif
 
     // Always pass through the connecting state, even if the audio channel is
     // already opened. ContinueWakeWordInvoke() rejects any other state, so

@@ -733,6 +733,15 @@ private:
                 (double)power_save_declines_.load(std::memory_order_relaxed));
         }
 
+        // Charge-complete is distinct from charging; preserve this telemetry
+        // independently of the removed legacy idle-shutdown counter.
+        if (pmic_ != nullptr) {
+            cJSON* battery = cJSON_GetObjectItem(root, "battery");
+            if (battery != nullptr) {
+                cJSON_AddBoolToObject(battery, "charge_done", pmic_->IsChargingDone());
+            }
+        }
+
         char* text = cJSON_PrintUnformatted(root);
         std::string result = text ? std::string(text) : base;
         if (text) {

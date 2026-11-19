@@ -183,7 +183,7 @@ void AudioService::Start() {
         },
         // Restore the original 24 KiB stack. The 16 KiB reduction was based
         // on idle headroom; actual listening traffic triggered stack overflow.
-        "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
+        "opus_codec", 2048 * 12, this, 5, &opus_codec_task_handle_);
     LogAudioMemory("after_opus_task");
 }
 

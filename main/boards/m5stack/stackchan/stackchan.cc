@@ -4,7 +4,6 @@
 #include "display/lcd_display.h"
 #include "application.h"
 #include "config.h"
-#include "power_save_timer.h"
 #include "i2c_device.h"
 #include "axp2101.h"
 
@@ -620,14 +619,6 @@ private:
     // decline logs at debug, which the default log level strips, so without this the one
     // mechanism carried over BECAUSE it was verified by observation would be unobservable.
     std::atomic<uint32_t> power_save_declines_{0};
-    // Idle shutdowns declined because the robot was on external power. Counted since boot and
-    // reported in the device status, so the gate can be checked without a serial cable.
-    std::atomic<uint32_t> idle_shutdown_declines_{0};
-    // Logged once per idle period rather than once per second: the shutdown request repeats on
-    // every tick while the robot sits idle on external power. Atomic because the decline runs on
-    // the esp_timer task while the reset runs on whoever woke the device.
-    std::atomic<bool> idle_shutdown_logged_{false};
-
     // The neck. Null when the bus did not come up: a robot that cannot turn its head should
     // still talk.
     ServoNeck* neck_ = nullptr;
@@ -637,64 +628,6 @@ private:
     // called on it.
     Display* display_;
     EspVideo* camera_;
-    PowerSaveTimer* power_save_timer_;
-
-    void InitializePowerSaveTimer() {
-        // 180 to dim, not 60. The face never stops animating - EmoteDisplay::SetPowerSaveMode is
-        // an empty function - so what "no idle expression" actually meant was the backlight
-        // dropping to an eighth of normal one minute in. Three minutes is longer than a pause in
-        // a conversation, and the floor below is high enough to read from across a desk.
-        //
-        // The shutdown threshold stays at 300 s and still only fires on battery (see
-        // OnShutdownRequest), so nothing about this changes when the robot switches off.
-        power_save_timer_ = new PowerSaveTimer(-1, 180, 300);
-        power_save_timer_->OnEnterSleepMode([this]() {
-            GetDisplay()->SetPowerSaveMode(true);
-            // 35 of 100, against a normal 75. Dim enough to be obviously resting, bright enough
-            // that the robot still has a face. 10 was a guess and it read as a dead screen.
-            GetBacklight()->SetBrightness(35);
-        });
-        power_save_timer_->OnExitSleepMode([this]() {
-            GetDisplay()->SetPowerSaveMode(false);
-            GetBacklight()->RestoreBrightness();
-            idle_shutdown_logged_.store(false, std::memory_order_relaxed);
-        });
-        power_save_timer_->OnShutdownRequest([this]() {
-            // Only on battery. Four upstream boards gate this the same way
-            // (alientek atk-dnesp32s3-box0 / box2-4g / box2-wifi / box3, each with
-            // `if (power_status_ == kDeviceBatterySupply)`), and PowerSaveTimer's own default
-            // for seconds_to_shutdown is -1 - upstream does not switch a board off unless the
-            // board asks for it.
-            //
-            // The PMIC is asked here rather than relied on through GetBatteryLevel, which also
-            // disables the timer when charging but only runs when something requests the device
-            // status. While the gateway was attached that happened constantly; with nothing
-            // polling, the gate never ran and a robot on USB power switched itself off after
-            // five idle minutes. A check that only works while someone is watching is not a
-            // check.
-            //
-            // Dimming still happens on USB power - that is what power saving should look like
-            // for a robot that sits on a desk. Switching off is not power saving when the only
-            // thing that can undo it is a person pressing a button.
-            //
-            // Said once per idle period, not once per second. PowerSaveCheck has no one-shot
-            // guard and does not reset ticks_, so once the count passes seconds_to_shutdown
-            // this callback is invoked on every tick. The four alientek boards avoid the
-            // problem by logging nothing on this path; a count plus one line keeps the gate
-            // observable without flooding the log.
-            if (pmic_ == nullptr || !pmic_->IsDischarging()) {
-                idle_shutdown_declines_.fetch_add(1, std::memory_order_relaxed);
-                if (!idle_shutdown_logged_.exchange(true, std::memory_order_relaxed)) {
-                    ESP_LOGI(TAG, "idle shutdown declined: running on external power");
-                }
-                return;
-            }
-            ESP_LOGW(TAG, "idle on battery; powering off");
-            pmic_->PowerOff();
-        });
-        power_save_timer_->SetEnabled(true);
-    }
-
     void InitializeI2c() {
         // Initialize I2C peripheral
         i2c_master_bus_config_t i2c_bus_cfg = {
@@ -798,19 +731,6 @@ private:
             // since-boot total, and two callers asking should get the same answer.
             cJSON_AddNumberToObject(network, "power_save_declines",
                 (double)power_save_declines_.load(std::memory_order_relaxed));
-        }
-
-        // Charge-complete is distinct from "charging": the base status reports the latter, and a
-        // battery sitting full on the dock reads as not charging, same as one on no power at all.
-        if (pmic_ != nullptr) {
-            cJSON* battery = cJSON_GetObjectItem(root, "battery");
-            if (battery != nullptr) {
-                cJSON_AddBoolToObject(battery, "charge_done", pmic_->IsChargingDone());
-                // A since-boot total, not cleared by reading: nonzero means the robot reached
-                // its idle shutdown threshold and stayed on because it was plugged in.
-                cJSON_AddNumberToObject(battery, "idle_shutdown_declines",
-                    (double)idle_shutdown_declines_.load(std::memory_order_relaxed));
-            }
         }
 
         char* text = cJSON_PrintUnformatted(root);
@@ -1161,7 +1081,6 @@ private:
 
 public:
     StackChanBoard() {
-        InitializePowerSaveTimer();
         InitializeI2c();
         InitializeAxp2101();
         InitializeAw9523();
@@ -1211,13 +1130,8 @@ public:
     }
 
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
-        static bool last_discharging = false;
         charging = pmic_->IsCharging();
         discharging = pmic_->IsDischarging();
-        if (discharging != last_discharging) {
-            power_save_timer_->SetEnabled(discharging);
-            last_discharging = discharging;
-        }
 
         level = pmic_->GetBatteryLevel();
         return true;
@@ -1232,17 +1146,6 @@ public:
     // atomics are here because the tool that sets them belongs with the rest of the device
     // controls rather than with the board bring-up.
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
-        // Two different things arrive through this one call, and they must stay separate.
-        //
-        // The level the application ASKED for is an activity signal: it asks for PERFORMANCE when
-        // something is happening, which is the cue for the screen-dim timer. That stays driven by
-        // the request, whatever the radio ends up doing - otherwise pinning the radio awake would
-        // pin the screen on too, and declining a LOW_POWER request would stop the display ever
-        // dimming.
-        if (level != PowerSaveLevel::LOW_POWER) {
-            power_save_timer_->WakeUp();
-        }
-
         // The radio is the pin's business (wn9-29). application.cc sets the level from twelve
         // places and drops to LOW_POWER at every idle, so a level set from outside survives only
         // until the next state change unless it is held here.

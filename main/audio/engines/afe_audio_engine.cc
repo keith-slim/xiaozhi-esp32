@@ -226,14 +226,17 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
         return false;
     }
 
-    processing_task_ = xTaskCreateStatic(
+    // Keep AFE fetch off CPU 0 (Wi-Fi and audio_input). On CPU 1, run
+    // above the priority-3 LVGL/StackChan update tasks without changing
+    // the PSRAM stack, AFE pipeline, or audio input task.
+    processing_task_ = xTaskCreateStaticPinnedToCore(
         [](void* arg) {
             auto* engine = static_cast<AfeAudioEngine*>(arg);
             engine->ProcessingTask();
             vTaskDelete(nullptr);
         },
-        "audio_afe", kProcessingTaskStackSize, this, 3, processing_task_stack_,
-        processing_task_buffer_);
+        "audio_afe", kProcessingTaskStackSize, this, 4, processing_task_stack_,
+        processing_task_buffer_, 1);
     if (processing_task_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create AFE processing task, internal free=%u largest=%u",
                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL),

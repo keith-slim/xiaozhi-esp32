@@ -274,7 +274,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     // Wait for server hello
     EventBits_t bits =
         xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE,
-                            pdFALSE, pdMS_TO_TICKS(10000));
+                            pdFALSE, pdMS_TO_TICKS(15000));
     log_connect_memory((bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT) ? "hello_received" : "hello_timeout");
     if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
         ESP_LOGE(TAG, "Failed to receive server hello");

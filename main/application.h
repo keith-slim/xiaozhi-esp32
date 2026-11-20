@@ -51,7 +51,7 @@ class Application {
     // and its origin. No separate startup lifecycle/lock is required.
     enum class AnnouncementKind : uint8_t {
         None, Touch, Test, Startup, Morning, Bedtime, WakeWord, Timer, Snore, SleepTalk,
-        DreamRemark, Monologue
+        DreamRemark, Monologue, MonologueTest
     };
 
 public:
@@ -129,7 +129,10 @@ public:
     AudioService& GetAudioService() { return audio_service_; }
     // Opt-in text-only speech using the existing Xiaozhi WebSocket/decoder.
     // Nonblocking: no network work under the StackChan LVGL lock.
-    bool RequestAnnouncement(const char* kind, const char* text);
+    bool RequestAnnouncement(const char* kind, const char* text, bool manual = false);
+    // End only the current conversation at its playback boundary, and stop
+    // autonomous speech without interrupting manual tests or greetings.
+    void QuietModeStarted();
     // Optional StackChan sleep-wake hook; called only on an actual wake-word event.
     // Empty result preserves the original immediate listening behavior.
     void SetWakeWordAnnouncementProvider(std::function<std::string()> provider) {
@@ -166,6 +169,7 @@ private:
     int64_t startup_hint_voice_wait_since_us_ = 0; // Main loop; bounded startup sound drain wait.
     AudioService audio_service_;
     std::atomic<uint32_t> last_speech_subtitle_tick_ms_{0};
+    bool quiet_end_pending_ = false; // main task only; current conversation
     bool tts_stop_pending_ = false;  // Stay in speaking state until actual queued PCM drains.
     std::atomic<AnnouncementKind> announcement_kind_{AnnouncementKind::None};
     int64_t announcement_started_us_ = 0; // main task only, bounded timeout
@@ -209,6 +213,9 @@ private:
     void ContinueOpenAudioChannel(ListeningMode mode);
     void MaybeReconnectAudioChannel();
     void FinishAnnouncement(const char* result = "completed");
+    void FinishConversationPlayback();
+    void CloseQuietConversation();
+    static bool IsQuietBackground(AnnouncementKind kind);
     static const char* AnnouncementTag(AnnouncementKind kind);
     void BeginWakeWordInvoke(const std::string& wake_word);
     void ContinueWakeWordInvoke(const std::string& wake_word);

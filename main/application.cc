@@ -274,8 +274,7 @@ void Application::Run() {
                     tts_stop_pending_ = false;
                     ESP_LOGI(TAG, "TTS playback drained; leaving speaking state");
                     if (IsAnnouncementActive()) FinishAnnouncement();
-                    else SetDeviceState(listening_mode_ == kListeningModeManualStop
-                                            ? kDeviceStateIdle : kDeviceStateListening);
+                    else FinishConversationPlayback();
                 }
             }
             // Deferred listening start (auto mode): the playback queue has
@@ -832,8 +831,7 @@ void Application::InitializeProtocol() {
                     }
                     tts_stop_pending_ = false;
                     if (IsAnnouncementActive()) FinishAnnouncement();
-                    else SetDeviceState(listening_mode_ == kListeningModeManualStop
-                                            ? kDeviceStateIdle : kDeviceStateListening);
+                    else FinishConversationPlayback();
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
@@ -1221,6 +1219,7 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
+            quiet_end_pending_ = false;
             // Keep a just-raised network error visible. SetDeviceState(idle)
             // queues STATE_CHANGED after Alert(), and the idle handler would
             // otherwise wipe the status, emotion, and chat message.
@@ -1483,12 +1482,13 @@ const char* Application::AnnouncementTag(AnnouncementKind kind) {
     case AnnouncementKind::Snore: return "snore";
     case AnnouncementKind::SleepTalk: return "sleep_talk";
     case AnnouncementKind::DreamRemark: return "dream_remark";
-    case AnnouncementKind::Monologue: return "monologue";
+    case AnnouncementKind::Monologue:
+    case AnnouncementKind::MonologueTest: return "monologue";
     default: return "none";
     }
 }
 
-bool Application::RequestAnnouncement(const char* kind, const char* text) {
+bool Application::RequestAnnouncement(const char* kind, const char* text, bool manual) {
     // All standalone sources share one audio-transport admission gate.
     // Never let an announcement reset a decoder while a chime, sound effect,
     // conversation, or another announcement is still playing.
@@ -1510,7 +1510,7 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
     else if (std::strcmp(kind, "snore") == 0) requested = AnnouncementKind::Snore;
     else if (std::strcmp(kind, "sleep_talk") == 0) requested = AnnouncementKind::SleepTalk;
     else if (std::strcmp(kind, "dream_remark") == 0) requested = AnnouncementKind::DreamRemark;
-    else if (std::strcmp(kind, "monologue") == 0) requested = AnnouncementKind::Monologue;
+    else if (std::strcmp(kind, "monologue") == 0) requested = manual ? AnnouncementKind::MonologueTest : AnnouncementKind::Monologue;
     else return false;
 
     // One atomic admission operation protects every standalone speech source.
@@ -1519,6 +1519,7 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
     ESP_LOGI(TAG, "[SPEECH] kind=%s phase=queued transport=ws12800", kind);
 
     Schedule([this, kind = std::string(kind), message = std::string(text)]() {
+        if (!IsAnnouncementActive()) return;
         if (!protocol_ || !is_websocket_protocol_ || GetDeviceState() != kDeviceStateIdle ||
             !SetDeviceState(kDeviceStateConnecting)) {
             announcement_kind_.store(AnnouncementKind::None);
@@ -1572,6 +1573,52 @@ uint8_t Application::ActiveSleepAnnouncement() const {
     const auto kind = announcement_kind_.load();
     return kind == AnnouncementKind::Snore ? 1 :
            kind == AnnouncementKind::SleepTalk ? 2 : 0;
+}
+
+bool Application::IsQuietBackground(AnnouncementKind kind) {
+    return kind == AnnouncementKind::Snore || kind == AnnouncementKind::SleepTalk ||
+           kind == AnnouncementKind::DreamRemark || kind == AnnouncementKind::Monologue;
+}
+
+void Application::CloseQuietConversation() {
+    quiet_end_pending_ = false;
+    auto_reconnect_pending_ = false;
+    pending_listening_start_ = false;
+    ESP_LOGI(TAG, "[QUIET] current conversation ended");
+    if (protocol_) protocol_->CloseAudioChannel();
+    SetDeviceState(kDeviceStateIdle);
+}
+
+void Application::FinishConversationPlayback() {
+    if (quiet_end_pending_) {
+        CloseQuietConversation();
+    } else {
+        SetDeviceState(listening_mode_ == kListeningModeManualStop
+                           ? kDeviceStateIdle : kDeviceStateListening);
+    }
+}
+
+void Application::QuietModeStarted() {
+    Schedule([this]() {
+        const auto kind = announcement_kind_.load();
+        if (IsQuietBackground(kind)) {
+            if (protocol_ && protocol_->IsAudioChannelOpened())
+                protocol_->SendAbortSpeaking(kAbortReasonNone);
+            audio_service_.ResetDecoder();
+            FinishAnnouncement("canceled_quiet");
+            return;
+        }
+        if (kind != AnnouncementKind::None) return;
+        const auto state = GetDeviceState();
+        if (state == kDeviceStateSpeaking) {
+            quiet_end_pending_ = true;
+            ESP_LOGI(TAG, "[QUIET] end conversation after playback");
+        } else if (state == kDeviceStateListening || state == kDeviceStateConnecting) {
+            CloseQuietConversation();
+        } else if (state == kDeviceStateIdle) {
+            auto_reconnect_pending_ = false;
+        }
+    });
 }
 
 void Application::CancelSleepAnnouncement() {

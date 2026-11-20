@@ -177,7 +177,7 @@ void AudioService::Start() {
     LogAudioMemory("before_opus_task");
     // Keep the original 24 KiB: actual listening traffic overflowed 16 KiB.
     // Only StackChan opts into PSRAM for now; other boards keep their old placement.
-#if CONFIG_BOARD_TYPE_STACKCHAN
+#if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
     constexpr bool prefer_psram = true;
 #else
     constexpr bool prefer_psram = false;

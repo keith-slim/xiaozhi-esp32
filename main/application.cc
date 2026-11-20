@@ -1516,6 +1516,9 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
             return;
         }
         announcement_started_us_ = esp_timer_get_time();
+        // Match the regular conversation path: wake Wi-Fi before opening the
+        // socket, including standalone sleep talk and snoring.
+        Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         // Publish CONNECTING before the potentially blocking WebSocket open.
         Schedule([this, kind, message]() {
             if (!IsAnnouncementActive() || !protocol_ ||
@@ -1549,6 +1552,7 @@ void Application::FinishAnnouncement(const char* result) {
     tts_stop_pending_ = false;
     announcement_subtitles_linger_ = true;
     if (protocol_) protocol_->CloseAudioChannel();
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
     if (GetDeviceState() != kDeviceStateIdle) SetDeviceState(kDeviceStateIdle);
     // Wake-word handoff is deferred to the clock tick so no late close
     // callback from this socket can reset the newly opened conversation.

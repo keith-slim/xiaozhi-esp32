@@ -722,7 +722,10 @@ private:
         // Onto the base status's own network object: whether the radio is being held awake is a
         // fact about the network, and the reason audio does or does not break up.
         if (cJSON* network = cJSON_GetObjectItem(root, "network")) {
-            bool pin = power_save_pinned_.load(std::memory_order_acquire);
+            // External power (or unknown battery status) keeps the performance pin.
+            // Battery discharge allows the application's normal power-save requests.
+            bool pin = power_save_pinned_.load(std::memory_order_acquire) &&
+                       !(pmic_ && pmic_->IsDischarging());
             cJSON_AddStringToObject(network, "power_save", pin
                 ? PowerSaveLevelName((PowerSaveLevel)power_save_pinned_level_.load(
                       std::memory_order_acquire))
@@ -1151,14 +1154,12 @@ public:
     // changes state - which is what made push-frame audio stutter on this board. No upstream
     // board overrides this to hold a level.
     //
-    // Pinned at PERFORMANCE by default. There is no tool to release the pin in this PR; the
-    // atomics are here because the tool that sets them belongs with the rest of the device
-    // controls rather than with the board bring-up.
+    // Hold Wi-Fi at PERFORMANCE on external power or if power status is unknown.
+    // On battery discharge, follow the application's requested level so that
+    // idle can save power while conversations and announcements remain responsive.
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
-        // The radio is the pin's business (wn9-29). application.cc sets the level from twelve
-        // places and drops to LOW_POWER at every idle, so a level set from outside survives only
-        // until the next state change unless it is held here.
-        if (power_save_pinned_.load(std::memory_order_acquire)) {
+        if (power_save_pinned_.load(std::memory_order_acquire) &&
+            !(pmic_ && pmic_->IsDischarging())) {
             PowerSaveLevel pinned =
                 (PowerSaveLevel)power_save_pinned_level_.load(std::memory_order_acquire);
             if (level != pinned) {

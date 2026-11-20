@@ -1,5 +1,8 @@
 #include "audio_service.h"
 #include "task_memory.h"
+#if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+#include "audio_signal_stats.h"
+#endif
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <algorithm>
@@ -27,6 +30,18 @@
 #endif
 
 #define TAG "AudioService"
+
+#if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+static void LogAudioSignal(const char* stage, AudioSignalStats& stats) {
+    if (stats.Frames() == 0) return;
+    ESP_LOGI(TAG, "[PCM_DIAG] stage=%s frames=%lu rms=%lu peak=%lu zero=%lu repeat_hash=%lu",
+             stage, static_cast<unsigned long>(stats.Frames()),
+             static_cast<unsigned long>(stats.Rms()), static_cast<unsigned long>(stats.Peak()),
+             static_cast<unsigned long>(stats.ZeroFrames()),
+             static_cast<unsigned long>(stats.RepeatHashFrames()));
+    stats.Reset();
+}
+#endif
 
 static void LogAudioMemory(const char* stage) {
     ESP_LOGI(TAG, "[MEM_DIAG] %s internal=%u largest=%u psram=%u", stage,
@@ -278,6 +293,9 @@ void AudioService::AudioInputTask() {
     uint32_t feed_max_us = 0;
     uint32_t input_frames = 0;
     uint32_t read_failures = 0;
+#if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+    AudioSignalStats mic_stats;
+#endif
     // The active event-group bits remain set throughout capture, so a successful
     // read/feed loop can run continuously on core 0 at priority 8. Give IDLE0
     // a brief scheduling window periodically to prevent task WDT starvation
@@ -307,6 +325,9 @@ void AudioService::AudioInputTask() {
                  (unsigned)uxTaskGetStackHighWaterMark(nullptr),
                  audio_output_task_handle_ ? (unsigned)uxTaskGetStackHighWaterMark(audio_output_task_handle_) : 0u,
                  opus_codec_task_handle_ ? (unsigned)uxTaskGetStackHighWaterMark(opus_codec_task_handle_) : 0u);
+#endif
+#if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+        LogAudioSignal("mic_16k", mic_stats);
 #endif
         input_frames = read_failures = read_max_us = feed_max_us = 0;
         read_total_us = feed_total_us = 0;
@@ -382,7 +403,13 @@ void AudioService::AudioInputTask() {
             const bool read_ok = ReadAudioData(capture_data, 16000, samples);
             const int64_t read_end = esp_timer_get_time();
             if (read_ok) {
-                const int64_t feed_begin = read_end;
+#if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+                if (bits & AS_EVENT_AUDIO_PROCESSOR_RUNNING) {
+                    // First channel is the microphone, not the playback reference.
+                    mic_stats.Observe(capture_data.data(), capture_data.size(), codec_->input_channels());
+                }
+#endif
+                const int64_t feed_begin = esp_timer_get_time();
                 audio_engine_->Feed(std::move(capture_data));
                 const int64_t feed_end = esp_timer_get_time();
                 const auto read_us = static_cast<uint32_t>(read_end - read_begin);
@@ -526,6 +553,10 @@ void AudioService::AudioOutputTask() {
 }
 
 void AudioService::OpusCodecTask() {
+#if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+    AudioSignalStats encode_stats;
+    int64_t encode_stats_at = esp_timer_get_time();
+#endif
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
         audio_queue_cv_.wait(lock, [this]() {
@@ -622,6 +653,16 @@ void AudioService::OpusCodecTask() {
             packet->timestamp = task.timestamp;
 
             if (opus_encoder_ != nullptr && task.pcm.size() == encoder_frame_size_) {
+#if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+                if (task.type == kAudioTaskTypeEncodeToSendQueue) {
+                    encode_stats.Observe(task.pcm.data(), task.pcm.size());
+                    const int64_t now = esp_timer_get_time();
+                    if (now - encode_stats_at >= 10000000) {
+                        LogAudioSignal("pre_opus", encode_stats);
+                        encode_stats_at = now;
+                    }
+                }
+#endif
                 packet->payload.resize(encoder_outbuf_size_);
                 esp_audio_enc_in_frame_t in = {
                     .buffer = (uint8_t*)(task.pcm.data()),

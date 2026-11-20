@@ -236,8 +236,13 @@ void CoreS3AudioCodec::EnableOutput(bool enable) {
 }
 
 int CoreS3AudioCodec::Read(int16_t* dest, int samples) {
-    if (input_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(input_dev_, (void*)dest, samples * sizeof(int16_t)));
+    if (!input_enabled_ || dest == nullptr || samples <= 0) {
+        return 0;
+    }
+    const int result = esp_codec_dev_read(input_dev_, dest, samples * sizeof(int16_t));
+    if (result != ESP_CODEC_DEV_OK) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(result);
+        return 0;
     }
     return samples;
 }

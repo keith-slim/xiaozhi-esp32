@@ -1483,6 +1483,7 @@ const char* Application::AnnouncementTag(AnnouncementKind kind) {
     case AnnouncementKind::Snore: return "snore";
     case AnnouncementKind::SleepTalk: return "sleep_talk";
     case AnnouncementKind::DreamRemark: return "dream_remark";
+    case AnnouncementKind::Monologue: return "monologue";
     default: return "none";
     }
 }
@@ -1509,6 +1510,7 @@ bool Application::RequestAnnouncement(const char* kind, const char* text) {
     else if (std::strcmp(kind, "snore") == 0) requested = AnnouncementKind::Snore;
     else if (std::strcmp(kind, "sleep_talk") == 0) requested = AnnouncementKind::SleepTalk;
     else if (std::strcmp(kind, "dream_remark") == 0) requested = AnnouncementKind::DreamRemark;
+    else if (std::strcmp(kind, "monologue") == 0) requested = AnnouncementKind::Monologue;
     else return false;
 
     // One atomic admission operation protects every standalone speech source.

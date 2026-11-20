@@ -50,7 +50,8 @@ class Application {
     // One atomic state represents both exclusive standalone speech ownership
     // and its origin. No separate startup lifecycle/lock is required.
     enum class AnnouncementKind : uint8_t {
-        None, Touch, Test, Startup, Morning, Bedtime, WakeWord, Timer, Snore, SleepTalk, DreamRemark
+        None, Touch, Test, Startup, Morning, Bedtime, WakeWord, Timer, Snore, SleepTalk,
+        DreamRemark, Monologue
     };
 
 public:

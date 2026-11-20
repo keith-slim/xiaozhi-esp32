@@ -5,6 +5,8 @@
 #include "system_info.h"
 
 #include <esp_log.h>
+#include <esp_heap_caps.h>
+#include <esp_timer.h>
 #include <arpa/inet.h>
 #include <cJSON.h>
 #include <cstring>
@@ -95,6 +97,17 @@ bool WebsocketProtocol::ReconnectAudioChannel() {
 }
 
 bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
+    const int64_t connection_started_us = esp_timer_get_time();
+    // Diagnostics only: never modify allocation, socket, or timeout behavior.
+    const auto log_connect_memory = [connection_started_us](const char* phase) {
+        ESP_LOGI(TAG, "[WS_MEM_DIAG] phase=%s elapsed_ms=%lu internal=%u largest=%u min_internal=%u psram=%u",
+                 phase,
+                 static_cast<unsigned long>((esp_timer_get_time() - connection_started_us) / 1000),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    };
     // Discard the previous transport before creating another one. Incrementing
     // the generation makes late callbacks from the old socket harmless.
     const unsigned generation = websocket_generation_.fetch_add(1) + 1;
@@ -113,9 +126,11 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     }
 
     error_occurred_ = false;
+    log_connect_memory("before_socket_create");
 
     auto network = Board::GetInstance().GetNetwork();
     websocket_ = network->CreateWebSocket(1);
+    log_connect_memory(websocket_ ? "socket_created" : "socket_create_failed");
     if (websocket_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create websocket");
         return false;
@@ -134,6 +149,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     websocket_->SetHeader("Protocol-Version", std::to_string(version_).c_str());
     websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
     websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+    log_connect_memory("headers_ready");
 
     websocket_->OnData([this, generation, intentional_close](const char* data, size_t len, bool binary) {
         if (generation != websocket_generation_.load()) return;
@@ -236,6 +252,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
 
     ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
     if (auto connected = websocket_->Connect(url.c_str()); !connected) {
+        log_connect_memory("connect_failed");
         ESP_LOGE(TAG, "Failed to connect to websocket server: %s",
                  connected.error().ToString().c_str());
         if (report_errors) {
@@ -244,16 +261,21 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
         return false;
     }
 
+    log_connect_memory("websocket_connected");
+
     // Send hello message to describe the client
     auto message = GetHelloMessage();
     if (!SendText(message)) {
+        log_connect_memory("hello_send_failed");
         return false;
     }
+    log_connect_memory("hello_sent");
 
     // Wait for server hello
     EventBits_t bits =
         xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE,
                             pdFALSE, pdMS_TO_TICKS(10000));
+    log_connect_memory((bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT) ? "hello_received" : "hello_timeout");
     if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
         ESP_LOGE(TAG, "Failed to receive server hello");
         if (report_errors) {

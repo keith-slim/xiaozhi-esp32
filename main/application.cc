@@ -1577,7 +1577,8 @@ uint8_t Application::ActiveSleepAnnouncement() const {
 
 bool Application::IsQuietBackground(AnnouncementKind kind) {
     return kind == AnnouncementKind::Snore || kind == AnnouncementKind::SleepTalk ||
-           kind == AnnouncementKind::DreamRemark || kind == AnnouncementKind::Monologue;
+           kind == AnnouncementKind::DreamRemark || kind == AnnouncementKind::Monologue ||
+           kind == AnnouncementKind::Timer;
 }
 
 void Application::CloseQuietConversation() {
@@ -1598,8 +1599,8 @@ void Application::FinishConversationPlayback() {
     }
 }
 
-void Application::QuietModeStarted() {
-    Schedule([this]() {
+void Application::QuietModeStarted(bool voice_command) {
+    Schedule([this, voice_command]() {
         const auto kind = announcement_kind_.load();
         if (IsQuietBackground(kind)) {
             if (protocol_ && protocol_->IsAudioChannelOpened())
@@ -1610,7 +1611,7 @@ void Application::QuietModeStarted() {
         }
         if (kind != AnnouncementKind::None) return;
         const auto state = GetDeviceState();
-        if (state == kDeviceStateSpeaking) {
+        if (state == kDeviceStateSpeaking || (voice_command && state == kDeviceStateListening)) {
             quiet_end_pending_ = true;
             ESP_LOGI(TAG, "[QUIET] end conversation after playback");
         } else if (state == kDeviceStateListening || state == kDeviceStateConnecting) {

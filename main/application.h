@@ -132,7 +132,7 @@ public:
     bool RequestAnnouncement(const char* kind, const char* text, bool manual = false);
     // End only the current conversation at its playback boundary, and stop
     // autonomous speech without interrupting manual tests or greetings.
-    void QuietModeStarted();
+    void QuietModeStarted(bool voice_command = false);
     // Optional StackChan sleep-wake hook; called only on an actual wake-word event.
     // Empty result preserves the original immediate listening behavior.
     void SetWakeWordAnnouncementProvider(std::function<std::string()> provider) {

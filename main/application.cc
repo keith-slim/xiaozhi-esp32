@@ -702,6 +702,13 @@ void Application::InitializeProtocol() {
 
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        // WebSocket uses this callback after server hello; unlike MQTT it
+        // does not invoke OnConnected(). Clear a previous connection error
+        // without resetting the connecting/listening UI or other subtitles.
+        if (!last_error_message_.empty()) {
+            DismissAlert();
+            board.GetDisplay()->SetChatMessage("system", "");
+        }
         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
             ESP_LOGW(TAG,
                      "Server sample rate %d does not match device output sample rate %d, "

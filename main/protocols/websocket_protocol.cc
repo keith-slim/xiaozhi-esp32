@@ -10,9 +10,37 @@
 #include <arpa/inet.h>
 #include <cJSON.h>
 #include <cstring>
+#include <cerrno>
+#include <lwip/sockets.h>
+#include <lwip/opt.h>
+#include <freertos/task.h>
 #include "assets/lang_config.h"
 
 #define TAG "WS"
+
+namespace {
+// Read-only snapshot of lwIP descriptors; concurrent opens/closes may change
+// the count during the scan. SO_TYPE does not consume pending socket errors.
+void LogSocketUsage(const char* phase) {
+#if defined(CONFIG_LWIP_MAX_SOCKETS) && defined(LWIP_SOCKET_OFFSET)
+    const int saved_errno = errno;
+    unsigned used = 0;
+    unsigned unknown = 0;
+    for (int fd = LWIP_SOCKET_OFFSET; fd < LWIP_SOCKET_OFFSET + CONFIG_LWIP_MAX_SOCKETS; ++fd) {
+        int type = 0;
+        socklen_t size = sizeof(type);
+        if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &size) == 0) {
+            ++used;
+        } else if (errno != EBADF && errno != ENOTSOCK) {
+            ++unknown;
+        }
+    }
+    ESP_LOGI(TAG, "[WS_SOCKET_DIAG] phase=%s used=%u max=%u unknown=%u",
+             phase, used, (unsigned)CONFIG_LWIP_MAX_SOCKETS, unknown);
+    errno = saved_errno;
+#endif
+}
+}  // namespace
 
 WebsocketProtocol::WebsocketProtocol() { event_group_handle_ = xEventGroupCreate(); }
 
@@ -85,7 +113,10 @@ void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     if (intentional_close_) {
         intentional_close_->store(true);
     }
-    websocket_.reset();
+    if (websocket_) {
+        websocket_.reset();
+        LogSocketUsage("after_close");
+    }
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
@@ -127,6 +158,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
 
     error_occurred_ = false;
     log_connect_memory("before_socket_create");
+    LogSocketUsage("before_connect");
 
     auto network = Board::GetInstance().GetNetwork();
     websocket_ = network->CreateWebSocket(1);
@@ -151,8 +183,20 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
     log_connect_memory("headers_ready");
 
-    websocket_->OnData([this, generation, intentional_close](const char* data, size_t len, bool binary) {
+    websocket_->OnData([this, generation, intentional_close, connection_started_us, first_frame = true](const char* data, size_t len, bool binary) mutable {
         if (generation != websocket_generation_.load()) return;
+        if (first_frame) {
+            first_frame = false;
+            ESP_LOGI(TAG, "[WS_RX_DIAG] first_frame elapsed_ms=%lu bytes=%u binary=%u internal=%u largest=%u",
+                     (unsigned long)((esp_timer_get_time() - connection_started_us) / 1000),
+                     (unsigned)len, (unsigned)binary,
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+#if (INCLUDE_uxTaskGetStackHighWaterMark == 1)
+            ESP_LOGI(TAG, "[WS_RX_DIAG] receive_task=%s stack_free=%u",
+                     pcTaskGetName(nullptr), (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+#endif
+        }
         if (binary) {
             if (on_incoming_audio_ != nullptr) {
                 // Validate the framing before constructing a PCM/Opus packet.
@@ -253,6 +297,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
     if (auto connected = websocket_->Connect(url.c_str()); !connected) {
         log_connect_memory("connect_failed");
+        LogSocketUsage("connect_failed");
         ESP_LOGE(TAG, "Failed to connect to websocket server: %s",
                  connected.error().ToString().c_str());
         if (report_errors) {
@@ -262,13 +307,17 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     }
 
     log_connect_memory("websocket_connected");
+    LogSocketUsage("websocket_connected");
 
     // Send hello message to describe the client
     auto message = GetHelloMessage();
+    const int64_t hello_send_started_us = esp_timer_get_time();
     if (!SendText(message)) {
         log_connect_memory("hello_send_failed");
         return false;
     }
+    ESP_LOGI(TAG, "[WS_TX_DIAG] hello bytes=%u send_us=%lu", (unsigned)message.size(),
+             (unsigned long)(esp_timer_get_time() - hello_send_started_us));
     log_connect_memory("hello_sent");
 
     // Wait for server hello
@@ -277,6 +326,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
                             pdFALSE, pdMS_TO_TICKS(15000));
     log_connect_memory((bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT) ? "hello_received" : "hello_timeout");
     if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
+        LogSocketUsage("hello_timeout");
         ESP_LOGE(TAG, "Failed to receive server hello");
         if (report_errors) {
             SetError(Lang::Strings::SERVER_TIMEOUT);

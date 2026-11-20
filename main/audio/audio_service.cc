@@ -1,4 +1,5 @@
 #include "audio_service.h"
+#include "task_memory.h"
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <algorithm>
@@ -174,16 +175,24 @@ void AudioService::Start() {
 #endif
 
     LogAudioMemory("before_opus_task");
-    /* Start the opus codec task */
-    xTaskCreate(
-        [](void* arg) {
-            AudioService* audio_service = (AudioService*)arg;
-            audio_service->OpusCodecTask();
-            vTaskDelete(NULL);
-        },
-        // Restore the original 24 KiB stack. The 16 KiB reduction was based
-        // on idle headroom; actual listening traffic triggered stack overflow.
-        "opus_codec", 2048 * 12, this, 5, &opus_codec_task_handle_);
+    // Keep the original 24 KiB: actual listening traffic overflowed 16 KiB.
+    // Only StackChan opts into PSRAM for now; other boards keep their old placement.
+#if CONFIG_BOARD_TYPE_STACKCHAN
+    constexpr bool prefer_psram = true;
+#else
+    constexpr bool prefer_psram = false;
+#endif
+    constexpr unsigned opus_stack_bytes = 24 * 1024;
+    const auto stack_location =
+        task_memory::CreatePreferPsram<AudioService, &AudioService::OpusCodecTask>(
+            "opus_codec", opus_stack_bytes, this, 5, &opus_codec_task_handle_, prefer_psram);
+    if (stack_location == task_memory::StackLocation::Failed) {
+        ESP_LOGE(TAG, "[STACK_DIAG] opus_codec task creation failed");
+    } else {
+        ESP_LOGI(TAG, "[STACK_DIAG] opus_codec stack=%s bytes=%u",
+                 stack_location == task_memory::StackLocation::Psram ? "PSRAM" : "INTERNAL",
+                 opus_stack_bytes);
+    }
     LogAudioMemory("after_opus_task");
 }
 

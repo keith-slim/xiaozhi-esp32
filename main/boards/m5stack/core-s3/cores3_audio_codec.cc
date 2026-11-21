@@ -18,6 +18,9 @@ CoreS3AudioCodec::CoreS3AudioCodec(void* i2c_master_handle, int input_sample_rat
     // CoreS3の2本の物理マイクを常に独立入力として保持する。
     // 基板上のMIC3入力はスピーカーのアナログAEC参照なので、必要時だけ末尾へ加える。
     input_channels_ = 2 + (input_reference_ ? 1 : 0);
+    // 2マイク+AECをESP32-S3のAFEへ同時投入すると実時間処理を維持できない。
+    // 方向推定用のMIC2は生PCMに残し、WakeNet/AECは従来のMIC1+参照で動かす。
+    afe_input_channels_ = 1 + (input_reference_ ? 1 : 0);
     input_sample_rate_ = input_sample_rate;
     output_sample_rate_ = output_sample_rate;
     input_gain_ = input_gain;

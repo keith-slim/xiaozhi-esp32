@@ -113,14 +113,22 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
         return true;
     }
 
-    int ref_num = codec_->input_reference() ? 1 : 0;
+    const int ref_num = codec_->input_reference() ? 1 : 0;
+    const int afe_input_channels = codec_->afe_input_channels();
+    if (afe_input_channels <= ref_num || afe_input_channels > codec_->input_channels()) {
+        ESP_LOGE(TAG, "Invalid AFE channel count: codec=%d afe=%d ref=%d",
+                 codec_->input_channels(), afe_input_channels, ref_num);
+        return false;
+    }
     std::string input_format;
-    for (int i = 0; i < codec_->input_channels() - ref_num; ++i) {
+    for (int i = 0; i < afe_input_channels - ref_num; ++i) {
         input_format.push_back('M');
     }
     for (int i = 0; i < ref_num; ++i) {
         input_format.push_back('R');
     }
+    ESP_LOGI(TAG, "AFE input format: %s (codec channels: %d)", input_format.c_str(),
+             codec_->input_channels());
 
     char* vad_model_name =
         models_ == nullptr ? nullptr : esp_srmodel_filter(models_, ESP_VADN_PREFIX, nullptr);
@@ -272,8 +280,27 @@ void AfeAudioEngine::Feed(std::vector<int16_t>&& data) {
     if ((xEventGroupGetBits(event_group_) & kAfeActive) == 0) {
         return;
     }
-    input_buffer_.insert(input_buffer_.end(), data.begin(), data.end());
-    size_t chunk_size = afe_iface_->get_feed_chunksize(afe_data_) * codec_->input_channels();
+    const size_t codec_channels = codec_->input_channels();
+    const size_t afe_channels = codec_->afe_input_channels();
+    if (codec_channels == afe_channels) {
+        input_buffer_.insert(input_buffer_.end(), data.begin(), data.end());
+    } else {
+        // 生PCMの追加マイクは方向推定用に保持し、AFEには必要なM...Rだけを詰め直す。
+        const size_t reference_channels = codec_->input_reference() ? 1u : 0u;
+        const size_t afe_microphone_channels = afe_channels - reference_channels;
+        const size_t frames = data.size() / codec_channels;
+        input_buffer_.reserve(input_buffer_.size() + frames * afe_channels);
+        for (size_t frame = 0; frame < frames; ++frame) {
+            const size_t offset = frame * codec_channels;
+            for (size_t channel = 0; channel < afe_microphone_channels; ++channel) {
+                input_buffer_.push_back(data[offset + channel]);
+            }
+            if (reference_channels != 0) {
+                input_buffer_.push_back(data[offset + codec_channels - 1]);
+            }
+        }
+    }
+    size_t chunk_size = afe_iface_->get_feed_chunksize(afe_data_) * afe_channels;
     while (input_buffer_.size() >= chunk_size) {
         afe_iface_->feed(afe_data_, input_buffer_.data());
         input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + chunk_size);

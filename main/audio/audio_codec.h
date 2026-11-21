@@ -43,6 +43,9 @@ public:
     inline int input_sample_rate() const { return input_sample_rate_; }
     inline int output_sample_rate() const { return output_sample_rate_; }
     inline int input_channels() const { return input_channels_; }
+    inline int afe_input_channels() const {
+        return afe_input_channels_ > 0 ? afe_input_channels_ : input_channels_;
+    }
     inline int output_channels() const { return output_channels_; }
     inline int output_volume() const { return output_volume_; }
     inline float input_gain() const { return input_gain_; }
@@ -60,6 +63,9 @@ protected:
     int input_sample_rate_ = 0;
     int output_sample_rate_ = 0;
     int input_channels_ = 1;
+    // 0 means that AFE consumes every codec input channel. A board may retain
+    // additional raw microphone channels while feeding a smaller real-time AFE layout.
+    int afe_input_channels_ = 0;
     int output_channels_ = 1;
     int output_volume_ = 70;
     float input_gain_ = 0.0;

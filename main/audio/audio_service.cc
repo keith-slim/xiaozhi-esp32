@@ -313,7 +313,8 @@ void AudioService::AudioInputTask() {
     uint32_t input_frames = 0;
     uint32_t read_failures = 0;
 #if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
-    AudioSignalStats mic_stats;
+    AudioSignalStats mic1_stats;
+    AudioSignalStats mic2_stats;
 #endif
     // The active event-group bits remain set throughout capture, so a successful
     // read/feed loop can run continuously on core 0 at priority 8. Give IDLE0
@@ -346,7 +347,8 @@ void AudioService::AudioInputTask() {
                  opus_codec_task_handle_ ? (unsigned)uxTaskGetStackHighWaterMark(opus_codec_task_handle_) : 0u);
 #endif
 #if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
-        LogAudioSignal("mic_16k", mic_stats);
+        LogAudioSignal("mic1_16k", mic1_stats);
+        LogAudioSignal("mic2_16k", mic2_stats);
 #endif
         input_frames = read_failures = read_max_us = feed_max_us = 0;
         read_total_us = feed_total_us = 0;
@@ -402,10 +404,11 @@ void AudioService::AudioInputTask() {
             std::vector<int16_t> data;
             int samples = OPUS_FRAME_DURATION_MS * 16000 / 1000;
             if (ReadAudioData(data, 16000, samples)) {
-                // If input channels is 2, we need to fetch the left channel data
-                if (codec_->input_channels() == 2) {
-                    auto mono_data = std::vector<int16_t>(data.size() / 2);
-                    for (size_t i = 0, j = 0; i < mono_data.size(); ++i, j += 2) {
+                const size_t channels = codec_->input_channels();
+                if (channels > 1) {
+                    // 音声テスト用Opusはモノラルなので、MM/MMRでも先頭マイクだけを送る。
+                    auto mono_data = std::vector<int16_t>(data.size() / channels);
+                    for (size_t i = 0, j = 0; i < mono_data.size(); ++i, j += channels) {
                         mono_data[i] = data[j];
                     }
                     data = std::move(mono_data);
@@ -424,8 +427,15 @@ void AudioService::AudioInputTask() {
             if (read_ok) {
 #if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
                 if (bits & AS_EVENT_AUDIO_PROCESSOR_RUNNING) {
-                    // First channel is the microphone, not the playback reference.
-                    mic_stats.Observe(capture_data.data(), capture_data.size(), codec_->input_channels());
+                    const size_t channels = codec_->input_channels();
+                    const size_t microphone_channels =
+                        channels - (codec_->input_reference() ? 1u : 0u);
+                    mic1_stats.Observe(capture_data.data(), capture_data.size(), channels);
+                    if (microphone_channels >= 2 && capture_data.size() > 1) {
+                        // 2本目が実際に別信号を出しているかCOMログで確認できるようにする。
+                        mic2_stats.Observe(capture_data.data() + 1, capture_data.size() - 1,
+                                           channels);
+                    }
                 }
 #endif
                 const int64_t feed_begin = esp_timer_get_time();

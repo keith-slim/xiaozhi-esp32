@@ -15,7 +15,9 @@ CoreS3AudioCodec::CoreS3AudioCodec(void* i2c_master_handle, int input_sample_rat
                                    float input_gain) {
     duplex_ = true; // 是否双工
     input_reference_ = input_reference; // 是否使用参考输入，实现回声消除
-    input_channels_ = input_reference_ ? 2 : 1; // 输入通道数
+    // CoreS3の2本の物理マイクを常に独立入力として保持する。
+    // 基板上のMIC3入力はスピーカーのアナログAEC参照なので、必要時だけ末尾へ加える。
+    input_channels_ = 2 + (input_reference_ ? 1 : 0);
     input_sample_rate_ = input_sample_rate;
     output_sample_rate_ = output_sample_rate;
     input_gain_ = input_gain;
@@ -199,15 +201,21 @@ void CoreS3AudioCodec::EnableInput(bool enable) {
         esp_codec_dev_sample_info_t fs = {
             .bits_per_sample = 16,
             .channel = 4,
-            .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
+            .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
+                            ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1),
             .sample_rate = (uint32_t)output_sample_rate_,
             .mclk_multiple = 0,
         };
         if (input_reference_) {
-            fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
+            fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(2);
         }
         ESP_ERROR_CHECK(esp_codec_dev_open(input_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(input_dev_, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), input_gain_));
+        const uint16_t microphone_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
+                                         ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
+        ESP_ERROR_CHECK(
+            esp_codec_dev_set_in_channel_gain(input_dev_, microphone_mask, input_gain_));
+        ESP_LOGI(TAG, "Input layout: %s, logical channels: %d",
+                 input_reference_ ? "MMR" : "MM", input_channels_);
     } else {
         ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
     }

@@ -50,6 +50,10 @@ the interleaved PCM returned by the codec.
 
 Multiple-microphone input remains available for developer experiments; the AFE
 still derives its format from the codec's microphone and reference counts.
+CoreS3 exposes both onboard microphones. Its layout is `MMR` when the board
+enables the analog playback reference wired to ES7210 MIC3, or `MM` without the
+reference. The physical microphone samples remain separate at the codec/AFE
+boundary; AFE output for wake-word detection and uplink remains mono.
 For Box Lite, the final `BoxAudioCodecLite` constructor parameter is
 `microphone_channels`, defaulting to `1`. Pass `2` explicitly to test `MMR`
 with reference enabled, or `MM` without it. `EnableInput()` and `Read()` use this

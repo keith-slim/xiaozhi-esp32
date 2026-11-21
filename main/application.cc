@@ -336,6 +336,7 @@ void Application::Run() {
             clock_ticks_++;
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
+            TryStartLocalNetworkService();
             MaybeReconnectAudioChannel();
             // A wake word can interrupt a sleep sound already playing through
             // the single audio decoder. Cancel and fully close that socket
@@ -398,8 +399,21 @@ void Application::Run() {
     }
 }
 
+void Application::TryStartLocalNetworkService() {
+    if (!local_network_connected_ || !local_network_service_starter_ || IsAnnouncementActive()) return;
+    const auto state = GetDeviceState();
+    if (state != kDeviceStateStarting && state != kDeviceStateWifiConfiguring &&
+        state != kDeviceStateActivating && state != kDeviceStateIdle) return;
+
+    // Do not delay activation when local service resources are unavailable.
+    // The service owns its retry interval; never call it from the Wi-Fi event task.
+    if (local_network_service_starter_()) local_network_service_starter_ = nullptr;
+}
+
 void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
+    local_network_connected_ = true;
+    TryStartLocalNetworkService();
     auto state = GetDeviceState();
 
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
@@ -426,6 +440,7 @@ void Application::HandleNetworkConnectedEvent() {
 }
 
 void Application::HandleNetworkDisconnectedEvent() {
+    local_network_connected_ = false;
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
     if (state == kDeviceStateNotifying) {

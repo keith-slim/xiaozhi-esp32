@@ -70,6 +70,13 @@ public:
      */
     void Initialize();
 
+    // Optional local service, installed before Initialize(). Called only from
+    // the main event loop after network connection, before AI activation.
+    // Return true once started; false permits a later retry.
+    void SetLocalNetworkServiceStarter(bool (*starter)()) {
+        local_network_service_starter_ = starter;
+    }
+
     /**
      * Run the main event loop
      * This function runs in the main task and never returns.
@@ -200,6 +207,8 @@ private:
     bool pending_listening_start_ = false;  // Waiting for playback to drain before starting listening (auto mode)
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
+    bool (*local_network_service_starter_)() = nullptr;
+    bool local_network_connected_ = false; // main event loop only
     bool is_websocket_protocol_ = false;
     bool auto_reconnect_pending_ = false;
     unsigned auto_reconnect_attempts_ = 0;
@@ -211,6 +220,7 @@ private:
     void HandleToggleChatEvent();
     void HandleStartListeningEvent();
     void HandleStopListeningEvent();
+    void TryStartLocalNetworkService();
     void HandleNetworkConnectedEvent();
     void HandleNetworkDisconnectedEvent();
     void HandleActivationDoneEvent();

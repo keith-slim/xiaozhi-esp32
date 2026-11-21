@@ -53,6 +53,8 @@ still derives its format from the codec's microphone and reference counts.
 CoreS3 exposes both onboard microphones. Its layout is `MMR` when the board
 enables the analog playback reference wired to ES7210 MIC3, or `MM` without the
 reference. Both physical microphone samples remain separate in raw codec PCM.
+ES7210 emits TDM I2S slots in `MIC1, MIC3, MIC2, MIC4` order, so the CoreS3
+codec normalizes its selected `MIC1, AEC(MIC3), MIC2` samples to logical `MMR`.
 To keep WakeNet real-time on ESP32-S3, CoreS3 compacts `MMR` to `MR` only at the
 AFE feed boundary; the second raw microphone remains available for direction
 estimation. AFE output for wake-word detection and uplink remains mono.

@@ -204,13 +204,15 @@ void CoreS3AudioCodec::EnableInput(bool enable) {
         esp_codec_dev_sample_info_t fs = {
             .bits_per_sample = 16,
             .channel = 4,
+            // ES7210のTDM I2S順はMIC1, MIC3, MIC2, MIC4。
+            // 物理マイクはスロット0/2、アナログAEC参照はスロット1にある。
             .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
-                            ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1),
+                            ESP_CODEC_DEV_MAKE_CHANNEL_MASK(2),
             .sample_rate = (uint32_t)output_sample_rate_,
             .mclk_multiple = 0,
         };
         if (input_reference_) {
-            fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(2);
+            fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
         }
         ESP_ERROR_CHECK(esp_codec_dev_open(input_dev_, &fs));
         const uint16_t microphone_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
@@ -254,6 +256,12 @@ int CoreS3AudioCodec::Read(int16_t* dest, int samples) {
     if (result != ESP_CODEC_DEV_OK) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(result);
         return 0;
+    }
+    if (input_reference_) {
+        // I2Sドライバが詰めた[MIC1, AEC, MIC2]を、共通音声処理の[MMR]へ正規化する。
+        for (int i = 0; i + 2 < samples; i += input_channels_) {
+            std::swap(dest[i + 1], dest[i + 2]);
+        }
     }
     return samples;
 }

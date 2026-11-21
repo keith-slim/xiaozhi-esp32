@@ -2,8 +2,10 @@
 #define PROTOCOL_H
 
 #include <cJSON.h>
-#include <chrono>
+#include <atomic>
+#include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -47,6 +49,10 @@ public:
     inline int server_sample_rate() const { return server_sample_rate_; }
     inline int server_frame_duration() const { return server_frame_duration_; }
     inline const std::string& session_id() const { return session_id_; }
+    // Application callbacks can outlive their transport event in the main-task
+    // queue. These tokens let consumers reject work from an older connection.
+    virtual unsigned connection_generation() const { return 0; }
+    virtual unsigned callback_generation() const { return connection_generation(); }
 
     void OnIncomingAudio(std::function<void(std::unique_ptr<AudioStreamPacket> packet)> callback);
     void OnIncomingJson(std::function<void(const cJSON* root)> callback);
@@ -82,12 +88,13 @@ protected:
     int server_frame_duration_ = 60;
     bool error_occurred_ = false;
     std::string session_id_;
-    std::chrono::time_point<std::chrono::steady_clock> last_incoming_time_;
+    std::atomic<int64_t> last_incoming_time_us_{0};
 
     virtual bool SendText(const std::string& text) = 0;
     virtual void SetError(const std::string& message);
     void SetError(const std::string& message, const std::string& detail);
     virtual bool IsTimeout() const;
+    void MarkIncoming();
     static void AddTextFontCapabilities(cJSON* root);
 };
 

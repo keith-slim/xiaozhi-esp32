@@ -23,12 +23,19 @@ public:
     bool ReconnectAudioChannel();
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;
+    unsigned connection_generation() const override {
+        return websocket_generation_.load(std::memory_order_relaxed);
+    }
+    unsigned callback_generation() const override {
+        return callback_generation_.load(std::memory_order_relaxed);
+    }
 
 private:
     EventGroupHandle_t event_group_handle_;
     std::shared_ptr<WebSocket> websocket_;
     std::shared_ptr<std::atomic<bool>> intentional_close_;
     std::atomic<unsigned> websocket_generation_{0};
+    std::atomic<unsigned> callback_generation_{0};
     bool report_connect_errors_ = true;
     int version_ = 1;
 

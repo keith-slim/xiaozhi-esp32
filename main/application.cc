@@ -244,8 +244,8 @@ void Application::Run() {
                 StopNotification();
             }
             SetDeviceState(kDeviceStateIdle);
-            Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "cancel",
-                  Lang::Sounds::OGG_EXCLAMATION);
+            const std::string error = LastErrorMessage();
+            Alert(Lang::Strings::ERROR, error.c_str(), "cancel", Lang::Sounds::OGG_EXCLAMATION);
         }
 
         if (bits & MAIN_EVENT_NETWORK_CONNECTED) {
@@ -488,7 +488,7 @@ void Application::HandleActivationDoneEvent() {
     // Protocol start may have already raised MAIN_EVENT_ERROR. Do not replace
     // that alert with the "ready" UI/sound — the main loop can process both
     // events back-to-back because the activation task is lower priority.
-    const bool has_error = !last_error_message_.empty();
+    const bool has_error = HasLastErrorMessage();
     if (!startup_completed_) {
         startup_completed_ = true;
         pending_startup_wake_word_hint_ = !has_error;
@@ -674,8 +674,10 @@ void Application::InitializeProtocol() {
     if (is_websocket_protocol_) {
         protocol_->OnDisconnected([this]() {
             const DeviceState lost_state = GetDeviceState();
-            Schedule([this, lost_state]() {
+            const unsigned generation = protocol_ ? protocol_->callback_generation() : 0;
+            Schedule([this, lost_state, generation]() {
                 if (!is_websocket_protocol_ || !protocol_ ||
+                    protocol_->connection_generation() != generation ||
                     (lost_state != kDeviceStateListening && lost_state != kDeviceStateSpeaking)) {
                     return;
                 }
@@ -686,39 +688,48 @@ void Application::InitializeProtocol() {
             });
         });
     }
-    protocol_->OnConnected([this]() { DismissAlert(); });
+    protocol_->OnConnected([this]() { Schedule([this]() { DismissAlert(); }); });
 
     protocol_->OnNetworkError([this](const std::string& message) {
-        last_error_message_ = message;
+        SetLastErrorMessage(message);
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
 
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking) {
-            audio_service_.PushPacketToDecodeQueue(std::move(packet));
-        }
+        HandleIncomingTtsAudio(std::move(packet));
     });
 
-    protocol_->OnAudioChannelOpened([this, codec, &board]() {
-        board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
-        // WebSocket uses this callback after server hello; unlike MQTT it
-        // does not invoke OnConnected(). Clear a previous connection error
-        // without resetting the connecting/listening UI or other subtitles.
-        if (!last_error_message_.empty()) {
-            DismissAlert();
-            board.GetDisplay()->SetChatMessage("system", "");
-        }
-        if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
-            ESP_LOGW(TAG,
-                     "Server sample rate %d does not match device output sample rate %d, "
-                     "resampling may cause distortion",
-                     protocol_->server_sample_rate(), codec->output_sample_rate());
-        }
+    protocol_->OnAudioChannelOpened([this, codec]() {
+        const unsigned generation = protocol_ ? protocol_->callback_generation() : 0;
+        Schedule([this, codec, generation]() {
+            if (!protocol_ || protocol_->connection_generation() != generation) return;
+            auto& board = Board::GetInstance();
+            board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+            // WebSocket uses this callback after server hello; unlike MQTT it
+            // does not invoke OnConnected(). Clear a previous connection error
+            // without resetting the connecting/listening UI or other subtitles.
+            if (HasLastErrorMessage()) {
+                DismissAlert();
+                board.GetDisplay()->SetChatMessage("system", "");
+            }
+            if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
+                ESP_LOGW(TAG,
+                         "Server sample rate %d does not match device output sample rate %d, "
+                         "resampling may cause distortion",
+                         protocol_->server_sample_rate(), codec->output_sample_rate());
+            }
+        });
     });
 
-    protocol_->OnAudioChannelClosed([this, &board]() {
-        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
-        Schedule([this]() {
+    protocol_->OnAudioChannelClosed([this]() {
+        const unsigned generation = protocol_ ? protocol_->callback_generation() : 0;
+        Schedule([this, generation]() {
+            if (protocol_ && protocol_->connection_generation() != generation) {
+                ESP_LOGI(TAG, "Ignoring close callback from websocket generation %u", generation);
+                return;
+            }
+            Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+            ClearPendingTtsAudio();
             // Preserve ordering with queued TTS stop/playback events. Clearing
             // the flag on the network callback thread could re-enable listening.
             const AnnouncementKind interrupted = announcement_kind_.exchange(AnnouncementKind::None);
@@ -815,12 +826,15 @@ void Application::InitializeProtocol() {
                          kind_tag, state->valuestring);
             }
             if (strcmp(state->valuestring, "start") == 0) {
-                Schedule([this]() {
+                PrepareTtsStart();
+                if (!Schedule([this]() {
                     aborted_ = false;
                     tts_stop_pending_ = false;
                     last_speech_subtitle_tick_ms_.store(0);
-                    SetDeviceState(kDeviceStateSpeaking);
-                });
+                    ActivateTtsPlayback();
+                })) {
+                    ClearPendingTtsAudio();
+                }
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
                     if (GetDeviceState() != kDeviceStateSpeaking) return;
@@ -935,7 +949,7 @@ void Application::Alert(const char* status, const char* message, const char* emo
 }
 
 void Application::DismissAlert() {
-    last_error_message_.clear();
+    ClearLastErrorMessage();
     if (GetDeviceState() == kDeviceStateIdle) {
         auto display = Board::GetInstance().GetDisplay();
         display->SetStatus(Lang::Strings::STANDBY);
@@ -1223,7 +1237,7 @@ void Application::HandleStateChangedEvent() {
             // Keep a just-raised network error visible. SetDeviceState(idle)
             // queues STATE_CHANGED after Alert(), and the idle handler would
             // otherwise wipe the status, emotion, and chat message.
-            if (last_error_message_.empty()) {
+            if (!HasLastErrorMessage()) {
                 display->SetStatus(Lang::Strings::STANDBY);
                 if (!announcement_subtitles_linger_)
                     display->ClearChatMessages();  // Keep standalone review
@@ -1304,9 +1318,10 @@ void Application::ShowStartupWakeWordHint() {
     pending_startup_wake_word_hint_ = false;
     const auto state = GetDeviceState();
     const bool wake_word_running = audio_service_.IsWakeWordRunning();
-    if (state != kDeviceStateIdle || !last_error_message_.empty() || !wake_word_running) {
+    const bool has_error = HasLastErrorMessage();
+    if (state != kDeviceStateIdle || has_error || !wake_word_running) {
         ESP_LOGI(TAG, "Startup wake word hint skipped (state=%d, wake word running=%d, error=%d)",
-                 static_cast<int>(state), wake_word_running, !last_error_message_.empty());
+                 static_cast<int>(state), wake_word_running, has_error);
         return;
     }
 
@@ -1637,12 +1652,94 @@ void Application::CancelSleepAnnouncement() {
     });
 }
 
-void Application::Schedule(std::function<void()>&& callback) {
+bool Application::Schedule(std::function<void()>&& callback) {
+    static constexpr size_t kMaxMainTasks = 128;
+    bool queued = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        main_tasks_.push_back(std::move(callback));
+        if (main_tasks_.size() < kMaxMainTasks) {
+            main_tasks_.push_back(std::move(callback));
+            queued = true;
+        }
+    }
+    if (!queued) {
+        const uint32_t dropped = dropped_main_tasks_.fetch_add(1) + 1;
+        if (dropped == 1 || dropped % 32 == 0) {
+            ESP_LOGE(TAG, "Main task queue full; dropped callback (total=%lu)",
+                     static_cast<unsigned long>(dropped));
+        }
+        return false;
     }
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
+    return true;
+}
+
+std::string Application::LastErrorMessage() const {
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    return last_error_message_;
+}
+
+bool Application::HasLastErrorMessage() const {
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    return !last_error_message_.empty();
+}
+
+void Application::SetLastErrorMessage(const std::string& message) {
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    last_error_message_ = message;
+}
+
+void Application::ClearLastErrorMessage() {
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    last_error_message_.clear();
+}
+
+void Application::PrepareTtsStart() {
+    std::lock_guard<std::mutex> lock(pending_tts_audio_mutex_);
+    pending_tts_audio_.clear();
+    tts_start_pending_ = true;
+}
+
+void Application::HandleIncomingTtsAudio(std::unique_ptr<AudioStreamPacket> packet) {
+    if (!packet) return;
+    if (GetDeviceState() == kDeviceStateSpeaking) {
+        audio_service_.PushPacketToDecodeQueue(std::move(packet));
+        return;
+    }
+
+    static constexpr size_t kMaxPendingTtsPackets = 16;
+    std::unique_lock<std::mutex> lock(pending_tts_audio_mutex_);
+    // The state may have changed while this receive callback waited for the
+    // start handler. Recheck it under the same lock used by activation.
+    if (GetDeviceState() == kDeviceStateSpeaking) {
+        lock.unlock();
+        audio_service_.PushPacketToDecodeQueue(std::move(packet));
+        return;
+    }
+    if (!tts_start_pending_) return;
+    if (pending_tts_audio_.size() >= kMaxPendingTtsPackets) {
+        ESP_LOGW(TAG, "Pending TTS audio full; dropping packet before speaking state");
+        return;
+    }
+    pending_tts_audio_.push_back(std::move(packet));
+}
+
+void Application::ActivateTtsPlayback() {
+    std::lock_guard<std::mutex> lock(pending_tts_audio_mutex_);
+    SetDeviceState(kDeviceStateSpeaking);
+    while (!pending_tts_audio_.empty()) {
+        if (!audio_service_.PushPacketToDecodeQueue(std::move(pending_tts_audio_.front()))) {
+            ESP_LOGW(TAG, "Decode queue full while flushing pending TTS audio");
+        }
+        pending_tts_audio_.pop_front();
+    }
+    tts_start_pending_ = false;
+}
+
+void Application::ClearPendingTtsAudio() {
+    std::lock_guard<std::mutex> lock(pending_tts_audio_mutex_);
+    tts_start_pending_ = false;
+    pending_tts_audio_.clear();
 }
 
 void Application::AbortSpeaking(AbortReason reason) {

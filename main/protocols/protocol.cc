@@ -1,6 +1,7 @@
 #include "protocol.h"
 #include "assets.h"
 
+#include <chrono>
 #include <esp_log.h>
 
 #define TAG "Protocol"
@@ -125,11 +126,22 @@ void Protocol::SendMcpMessage(const std::string& payload) {
 
 bool Protocol::IsTimeout() const {
     const int kTimeoutSeconds = 120;
-    auto now = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_incoming_time_);
-    bool timeout = duration.count() > kTimeoutSeconds;
+    const int64_t last_us = last_incoming_time_us_.load(std::memory_order_relaxed);
+    if (last_us == 0) return false;
+    const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+    const int64_t duration_seconds = (now_us - last_us) / 1000000;
+    bool timeout = duration_seconds > kTimeoutSeconds;
     if (timeout) {
-        ESP_LOGE(TAG, "Channel timeout %ld seconds", (long)duration.count());
+        ESP_LOGE(TAG, "Channel timeout %ld seconds", (long)duration_seconds);
     }
     return timeout;
+}
+
+void Protocol::MarkIncoming() {
+    const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+    last_incoming_time_us_.store(now_us, std::memory_order_relaxed);
 }

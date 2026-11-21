@@ -264,7 +264,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
             }
             cJSON_Delete(root);
         }
-        last_incoming_time_ = std::chrono::steady_clock::now();
+        MarkIncoming();
     });
 
     // Callbacks run on the transport's receive task, which on 4G modems is the
@@ -284,6 +284,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
         }
         const bool unexpected = !intentional_close->load();
         ESP_LOGI(TAG, "Websocket disconnected (%s)", unexpected ? "unexpected" : "requested");
+        callback_generation_.store(generation, std::memory_order_relaxed);
         // Notify unexpected loss first; Application snapshots its active state
         // before the regular close callback transitions it back to idle.
         if (unexpected && on_disconnected_ != nullptr) {
@@ -312,7 +313,8 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     // Send hello message to describe the client
     auto message = GetHelloMessage();
     const int64_t hello_send_started_us = esp_timer_get_time();
-    if (!SendText(message)) {
+    if (message.empty() || !SendText(message)) {
+        ESP_LOGE(TAG, "Failed to create or send websocket hello");
         log_connect_memory("hello_send_failed");
         return false;
     }
@@ -336,6 +338,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
 
     report_connect_errors_ = true;
     if (on_audio_channel_opened_ != nullptr) {
+        callback_generation_.store(generation, std::memory_order_relaxed);
         on_audio_channel_opened_();
     }
 
@@ -345,25 +348,51 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
 std::string WebsocketProtocol::GetHelloMessage() {
     // keys: message type, version, audio_params (format, sample_rate, channels)
     cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "type", "hello");
-    cJSON_AddNumberToObject(root, "version", version_);
+    if (!root) return {};
+    if (!cJSON_AddStringToObject(root, "type", "hello") ||
+        !cJSON_AddNumberToObject(root, "version", version_)) {
+        cJSON_Delete(root);
+        return {};
+    }
     cJSON* features = cJSON_CreateObject();
+    if (!features) {
+        cJSON_Delete(root);
+        return {};
+    }
 #if CONFIG_USE_SERVER_AEC
-    cJSON_AddBoolToObject(features, "aec", true);
+    if (!cJSON_AddBoolToObject(features, "aec", true)) {
+        cJSON_Delete(features);
+        cJSON_Delete(root);
+        return {};
+    }
 #endif
-    cJSON_AddBoolToObject(features, "mcp", true);
-    cJSON_AddItemToObject(root, "features", features);
+    if (!cJSON_AddBoolToObject(features, "mcp", true) ||
+        !cJSON_AddItemToObject(root, "features", features)) {
+        cJSON_Delete(features);
+        cJSON_Delete(root);
+        return {};
+    }
     AddTextFontCapabilities(root);
-    cJSON_AddStringToObject(root, "transport", "websocket");
+    if (!cJSON_AddStringToObject(root, "transport", "websocket")) {
+        cJSON_Delete(root);
+        return {};
+    }
     cJSON* audio_params = cJSON_CreateObject();
-    cJSON_AddStringToObject(audio_params, "format", "opus");
-    cJSON_AddNumberToObject(audio_params, "sample_rate", 16000);
-    cJSON_AddNumberToObject(audio_params, "channels", 1);
-    cJSON_AddNumberToObject(audio_params, "frame_duration", OPUS_FRAME_DURATION_MS);
-    cJSON_AddItemToObject(root, "audio_params", audio_params);
+    if (!audio_params || !cJSON_AddStringToObject(audio_params, "format", "opus") ||
+        !cJSON_AddNumberToObject(audio_params, "sample_rate", 16000) ||
+        !cJSON_AddNumberToObject(audio_params, "channels", 1) ||
+        !cJSON_AddNumberToObject(audio_params, "frame_duration", OPUS_FRAME_DURATION_MS) ||
+        !cJSON_AddItemToObject(root, "audio_params", audio_params)) {
+        cJSON_Delete(audio_params);
+        cJSON_Delete(root);
+        return {};
+    }
     auto json_str = cJSON_PrintUnformatted(root);
-    std::string message(json_str);
-    cJSON_free(json_str);
+    std::string message;
+    if (json_str) {
+        message.assign(json_str);
+        cJSON_free(json_str);
+    }
     cJSON_Delete(root);
     return message;
 }

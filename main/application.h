@@ -89,7 +89,7 @@ public:
     /**
      * Schedule a callback to be executed in the main task
      */
-    void Schedule(std::function<void()>&& callback);
+    bool Schedule(std::function<void()>&& callback);
 
     /**
      * Alert with status, message, emotion and optional sound
@@ -157,6 +157,7 @@ private:
 
     std::mutex mutex_;
     std::deque<std::function<void()>> main_tasks_;
+    std::atomic<uint32_t> dropped_main_tasks_{0};
     std::unique_ptr<Protocol> protocol_;
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
@@ -164,6 +165,7 @@ private:
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AecMode aec_mode_ = kAecOff;
+    mutable std::mutex error_mutex_;
     std::string last_error_message_;
     std::string startup_wake_word_hint_message_;
     int64_t startup_hint_voice_wait_since_us_ = 0; // Main loop; bounded startup sound drain wait.
@@ -171,6 +173,9 @@ private:
     std::atomic<uint32_t> last_speech_subtitle_tick_ms_{0};
     bool quiet_end_pending_ = false; // main task only; current conversation
     bool tts_stop_pending_ = false;  // Stay in speaking state until actual queued PCM drains.
+    std::mutex pending_tts_audio_mutex_;
+    std::deque<std::unique_ptr<AudioStreamPacket>> pending_tts_audio_;
+    bool tts_start_pending_ = false;
     std::atomic<AnnouncementKind> announcement_kind_{AnnouncementKind::None};
     int64_t announcement_started_us_ = 0; // main task only, bounded timeout
     bool announcement_subtitles_linger_ = false; // main task only
@@ -226,6 +231,14 @@ private:
     void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
     void StopNotification();
     void HandleNotificationFinished(uint32_t playback_id, bool success);
+    std::string LastErrorMessage() const;
+    bool HasLastErrorMessage() const;
+    void SetLastErrorMessage(const std::string& message);
+    void ClearLastErrorMessage();
+    void PrepareTtsStart();
+    void HandleIncomingTtsAudio(std::unique_ptr<AudioStreamPacket> packet);
+    void ActivateTtsPlayback();
+    void ClearPendingTtsAudio();
 
     // Activation task (runs in background)
     void ActivationTask();

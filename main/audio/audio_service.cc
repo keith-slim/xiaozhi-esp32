@@ -151,9 +151,12 @@ void AudioService::Start() {
 
     esp_timer_start_periodic(audio_power_timer_, 1000000);
 
+    BaseType_t input_task_result = pdFAIL;
+    BaseType_t output_task_result = pdFAIL;
+
 #if CONFIG_USE_AUDIO_PROCESSOR
     /* Start the audio input task */
-    xTaskCreatePinnedToCore(
+    input_task_result = xTaskCreatePinnedToCore(
         [](void* arg) {
             AudioService* audio_service = (AudioService*)arg;
             audio_service->AudioInputTask();
@@ -162,7 +165,7 @@ void AudioService::Start() {
         "audio_input", 2048 * 3, this, 8, &audio_input_task_handle_, 0);
 
     /* Start the audio output task */
-    xTaskCreate(
+    output_task_result = xTaskCreate(
         [](void* arg) {
             AudioService* audio_service = (AudioService*)arg;
             audio_service->AudioOutputTask();
@@ -171,7 +174,7 @@ void AudioService::Start() {
         "audio_output", 2048 * 2, this, 4, &audio_output_task_handle_);
 #else
     /* Start the audio input task */
-    xTaskCreate(
+    input_task_result = xTaskCreate(
         [](void* arg) {
             AudioService* audio_service = (AudioService*)arg;
             audio_service->AudioInputTask();
@@ -180,7 +183,7 @@ void AudioService::Start() {
         "audio_input", 2048 * 2, this, 8, &audio_input_task_handle_);
 
     /* Start the audio output task */
-    xTaskCreate(
+    output_task_result = xTaskCreate(
         [](void* arg) {
             AudioService* audio_service = (AudioService*)arg;
             audio_service->AudioOutputTask();
@@ -188,6 +191,20 @@ void AudioService::Start() {
         },
         "audio_output", 2048, this, 4, &audio_output_task_handle_);
 #endif
+
+    if (input_task_result != pdPASS) {
+        audio_input_task_handle_ = nullptr;
+        ESP_LOGE(TAG, "Audio input task creation failed");
+    }
+    if (output_task_result != pdPASS) {
+        audio_output_task_handle_ = nullptr;
+        ESP_LOGE(TAG, "Audio output task creation failed");
+    }
+    if (input_task_result != pdPASS || output_task_result != pdPASS) {
+        ESP_LOGE(TAG, "Audio service startup aborted because a required task is unavailable");
+        Stop();
+        return;
+    }
 
     LogAudioMemory("before_opus_task");
     // Keep the original 24 KiB: actual listening traffic overflowed 16 KiB.
@@ -203,6 +220,8 @@ void AudioService::Start() {
             "opus_codec", opus_stack_bytes, this, 5, &opus_codec_task_handle_, prefer_psram);
     if (stack_location == task_memory::StackLocation::Failed) {
         ESP_LOGE(TAG, "[STACK_DIAG] opus_codec task creation failed");
+        Stop();
+        return;
     } else {
         ESP_LOGI(TAG, "[STACK_DIAG] opus_codec stack=%s bytes=%u",
                  stack_location == task_memory::StackLocation::Psram ? "PSRAM" : "INTERNAL",

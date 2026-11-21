@@ -1106,6 +1106,9 @@ void Application::HandleWakeWordDetectedEvent() {
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
+    // Board-specific perception runs independently and must not delay the
+    // normal wake-word state transition or audio-channel connection.
+    Board::GetInstance().OnWakeWordDetected();
 
     const auto active_kind = announcement_kind_.load();
     const bool sleep_sound_connection =

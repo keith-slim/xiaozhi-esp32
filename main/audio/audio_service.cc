@@ -1,4 +1,5 @@
 #include "audio_service.h"
+#include "board.h"
 #include "task_memory.h"
 #if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
 #include "audio_signal_stats.h"
@@ -426,10 +427,14 @@ void AudioService::AudioInputTask() {
             const int64_t read_end = esp_timer_get_time();
             if (read_ok) {
 #if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+                const size_t channels = codec_->input_channels();
+                const size_t microphone_channels = channels - (codec_->input_reference() ? 1u : 0u);
+                // The StackChan board copies MIC1/MIC2 into a bounded PSRAM
+                // ring. This hook must never block or perform network I/O.
+                Board::GetInstance().OnAudioInputFrame(capture_data.data(),
+                                                       capture_data.size() / channels, channels,
+                                                       microphone_channels);
                 if (bits & AS_EVENT_AUDIO_PROCESSOR_RUNNING) {
-                    const size_t channels = codec_->input_channels();
-                    const size_t microphone_channels =
-                        channels - (codec_->input_reference() ? 1u : 0u);
                     mic1_stats.Observe(capture_data.data(), capture_data.size(), channels);
                     if (microphone_channels >= 2 && capture_data.size() > 1) {
                         // 2本目が実際に別信号を出しているかCOMログで確認できるようにする。

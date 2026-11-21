@@ -2,12 +2,14 @@
 #define BOARD_H
 
 #include <http.h>
-#include <web_socket.h>
 #include <mqtt.h>
-#include <udp.h>
-#include <string>
-#include <functional>
 #include <network_interface.h>
+#include <udp.h>
+#include <web_socket.h>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <string>
 
 #include "led/led.h"
 #include "backlight.h"
@@ -78,6 +80,16 @@ public:
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) { (void)callback; }
     virtual const char* GetNetworkStateIcon() = 0;
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging);
+    // Optional board-local perception hooks. Audio callbacks must only copy
+    // into a bounded buffer; network and actuator work belongs in a worker.
+    virtual void OnAudioInputFrame(const int16_t* samples, size_t frames, size_t channels,
+                                   size_t microphone_channels) {
+        (void)samples;
+        (void)frames;
+        (void)channels;
+        (void)microphone_channels;
+    }
+    virtual void OnWakeWordDetected() {}
     virtual std::string GetSystemInfoJson();
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
     virtual std::string GetBoardJson() = 0;

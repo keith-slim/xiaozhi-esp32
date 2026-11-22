@@ -12,9 +12,53 @@
 #include <esp_vadn_models.h>
 
 #include "audio_service.h"
+#include "wake_net_threshold.h"
+#include <nvs.h>
 #include "wake_words/custom_wake_word.h"
 
 #define TAG "AfeAudioEngine"
+
+extern "C" void stackchan_nvs_commit_observer(void) __attribute__((weak));
+
+namespace WakeNetThreshold {
+namespace {
+constexpr char kNamespace[] = "audio";
+constexpr char kKey[] = "wake_threshold";
+std::atomic<int> desired{-1};
+}
+
+int Get() {
+    int value = desired.load();
+    if (value >= 0) return value;
+    int32_t stored = kDefault;
+    nvs_handle_t handle;
+    if (nvs_open(kNamespace, NVS_READONLY, &handle) == ESP_OK) {
+        if (nvs_get_i32(handle, kKey, &stored) != ESP_OK) stored = kDefault;
+        nvs_close(handle);
+    }
+    value = IsValid(stored) ? stored : kDefault;
+    int uninitialized = -1;
+    // Do not overwrite a Web save that completed while NVS was being read.
+    if (!desired.compare_exchange_strong(uninitialized, value)) return uninitialized;
+    return value;
+}
+
+bool Save(int value) {
+    if (!IsValid(value)) return false;
+    nvs_handle_t handle;
+    if (nvs_open(kNamespace, NVS_READWRITE, &handle) != ESP_OK) return false;
+    esp_err_t err = nvs_set_i32(handle, kKey, value);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WakeNet threshold save failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    desired.store(value);
+    if (stackchan_nvs_commit_observer) stackchan_nvs_commit_observer();
+    return true;
+}
+} // namespace WakeNetThreshold
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 static constexpr bool kUseAfeForVoiceProcessing = true;
@@ -166,6 +210,8 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
         if (wakenet_models.size() > 1) {
             afe_config->wakenet_model_name_2 = wakenet_models[1];
         }
+        wake_model_count_ = (afe_config->wakenet_model_name ? 1 : 0) +
+                            (afe_config->wakenet_model_name_2 ? 1 : 0);
         // Only the two models selected above are active in the AFE.
         wake_words_.clear();
         for (auto name : {afe_config->wakenet_model_name, afe_config->wakenet_model_name_2}) {
@@ -211,6 +257,10 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
     }
 
     if (wake_detector_ == WakeDetector::kWakeNet) {
+        // Initialize the cached NVS setting before the real-time fetch task.
+        WakeNetThreshold::Get();
+        applied_wake_threshold_ = WakeNetThreshold::kDefault;
+        attempted_wake_threshold_ = -1;
         afe_iface_->disable_wakenet(afe_data_);
     }
     if (codec_->input_reference()) {
@@ -433,6 +483,32 @@ void AfeAudioEngine::ApplyAfeControls() {
     }
 }
 
+void AfeAudioEngine::ApplyWakeNetThreshold() {
+    if (wake_detector_ != WakeDetector::kWakeNet ||
+        !(xEventGroupGetBits(event_group_) & kWakeWordEnabled)) return;
+    const int value = WakeNetThreshold::Get();
+    if (value == attempted_wake_threshold_) return;
+    attempted_wake_threshold_ = value;
+    // Preserve the original model defaults without calling the setter on a
+    // fresh AFE. A transition back to default uses the official reset API.
+    if (value == WakeNetThreshold::kDefault &&
+        applied_wake_threshold_ == WakeNetThreshold::kDefault) {
+        ESP_LOGI(TAG, "WakeNet threshold: model default");
+        return;
+    }
+    bool ok = wake_model_count_ > 0;
+    for (int index = 1; index <= wake_model_count_; ++index) {
+        const int rc = value == WakeNetThreshold::kDefault
+            ? afe_iface_->reset_wakenet_threshold(afe_data_, index)
+            : afe_iface_->set_wakenet_threshold(afe_data_, index, value / 100.0f);
+        if (rc != 1) ok = false;
+        ESP_LOGI(TAG, "WakeNet threshold: model=%d setting=%d result=%d", index, value, rc);
+    }
+    // A partial failure must not be mistaken for model defaults later.
+    applied_wake_threshold_ = ok ? value : -1;
+    if (!ok) ESP_LOGW(TAG, "WakeNet threshold apply failed; change setting to retry");
+}
+
 void AfeAudioEngine::ApplyPendingReset() {
     if (!reset_pending_.exchange(false)) {
         return;
@@ -485,6 +561,8 @@ void AfeAudioEngine::ProcessingTask() {
             // so they are applied here, in the task that owns the fetch side.
             ApplyAfeControls();
         }
+        // Only the fetch owner changes WakeNet settings, never the HTTP task.
+        ApplyWakeNetThreshold();
         const uint32_t generation = control_generation_.load();
         const int64_t fetch_begin = esp_timer_get_time();
         auto* result = afe_iface_->fetch_with_delay(afe_data_, portMAX_DELAY);

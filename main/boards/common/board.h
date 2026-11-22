@@ -90,6 +90,8 @@ public:
         (void)microphone_channels;
     }
     virtual void OnWakeWordDetected() {}
+    // Called immediately when an active conversation returns to idle.
+    virtual void OnConversationEnded() {}
     virtual std::string GetSystemInfoJson();
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
     virtual std::string GetBoardJson() = 0;

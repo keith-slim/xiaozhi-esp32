@@ -9,6 +9,12 @@
 #include <algorithm>
 #include <cstring>
 
+#if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+// Optional Stage1 display hook: the same PCM energy already used for subtitle
+// phrase boundaries drives lip sync. No extra audio scan or playback task.
+extern "C" void stackchan_speech_pcm_average(uint32_t average) __attribute__((weak));
+#endif
+
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)                                        \
     (esp_ae_rate_cvt_cfg_t) {                                                                \
         .src_rate = (uint32_t)(_src_rate), .dest_rate = (uint32_t)(_dest_rate),              \
@@ -526,6 +532,7 @@ void AudioService::AudioOutputTask() {
                 }
                 const size_t window = static_cast<size_t>(sample_rate / 100);
                 if (window != 0) {
+                    uint64_t total_energy = 0;
                     const uint64_t start_sample = total_samples - task.pcm.size();
                     for (size_t pos = 0; pos < task.pcm.size();) {
                         const size_t end = std::min(pos + window, task.pcm.size());
@@ -534,6 +541,7 @@ void AudioService::AudioOutputTask() {
                             const int32_t value = task.pcm[i];
                             energy += static_cast<uint32_t>(value < 0 ? -value : value);
                         }
+                        total_energy += energy;
                         const bool quiet = energy < 300u * (end - pos);
                         if (quiet) {
                             if (speech_has_voice_) speech_silence_samples_ += end - pos;
@@ -554,6 +562,12 @@ void AudioService::AudioOutputTask() {
                         }
                         pos = end;
                     }
+#if CONFIG_BOARD_TYPE_STACKCHAN || CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+                    if (stackchan_speech_pcm_average && !task.pcm.empty()) {
+                        stackchan_speech_pcm_average(
+                            static_cast<uint32_t>(total_energy / task.pcm.size()));
+                    }
+#endif
                 }
             }
         }

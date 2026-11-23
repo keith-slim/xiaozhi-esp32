@@ -16,6 +16,9 @@
 #include <freertos/task.h>
 #include "assets/lang_config.h"
 
+// Optional StackChan-specific schedule hook. Other Xiaozhi boards remain unchanged.
+extern "C" bool stackchan_wake_groggy_active() __attribute__((weak));
+
 #define TAG "WS"
 
 namespace {
@@ -181,6 +184,12 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     websocket_->SetHeader("Protocol-Version", std::to_string(version_).c_str());
     websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
     websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+    // Context is evaluated afresh for every WebSocket connection (normal
+    // conversation and each standalone speech event share this path).
+    if (stackchan_wake_groggy_active && stackchan_wake_groggy_active()) {
+        websocket_->SetHeader("X-StackChan-Wake-Groggy", "1");
+        ESP_LOGI(TAG, "[SPEECH] wake_groggy=1");
+    }
     log_connect_memory("headers_ready");
 
     websocket_->OnData([this, generation, intentional_close, connection_started_us, first_frame = true](const char* data, size_t len, bool binary) mutable {

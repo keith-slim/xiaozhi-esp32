@@ -18,6 +18,9 @@
 
 // Optional StackChan-specific schedule hook. Other Xiaozhi boards remain unchanged.
 extern "C" bool stackchan_wake_groggy_active() __attribute__((weak));
+// Optional StackChan reference facts, encoded as ASCII base64 for WS headers.
+// Standard Xiaozhi boards keep the existing handshake unchanged.
+extern "C" bool stackchan_ws_environment_context(char* output, size_t capacity) __attribute__((weak));
 
 #define TAG "WS"
 
@@ -184,6 +187,16 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     websocket_->SetHeader("Protocol-Version", std::to_string(version_).c_str());
     websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
     websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+    // The server establishes Gemini Live before receiving the device hello.
+    // Supply a cached snapshot on the handshake shared by conversation and
+    // standalone speech; never make a network request on this transport path.
+    if (stackchan_ws_environment_context) {
+        char encoded_context[1200]{};
+        if (stackchan_ws_environment_context(encoded_context, sizeof(encoded_context))) {
+            websocket_->SetHeader("X-StackChan-Environment", encoded_context);
+            ESP_LOGI(TAG, "[ENV] context header attached");
+        }
+    }
     // Context is evaluated afresh for every WebSocket connection (normal
     // conversation and each standalone speech event share this path).
     if (stackchan_wake_groggy_active && stackchan_wake_groggy_active()) {

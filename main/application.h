@@ -147,6 +147,8 @@ public:
     }
     void CancelSleepAnnouncement(); // Never interrupts an ordinary conversation.
     uint8_t ActiveSleepAnnouncement() const; // 0=none, 1=snore, 2=sleep talk; only during TTS.
+    // Match S3: dream speech does not need real-world clock or weather facts.
+    bool IsSleepTalkAnnouncementPending() const { return announcement_kind_.load() == AnnouncementKind::SleepTalk; }
     bool IsAnnouncementActive() const { return announcement_kind_.load() != AnnouncementKind::None; }
     bool IsStartupAnnouncementActive() const { return announcement_kind_.load() == AnnouncementKind::Startup; }
 

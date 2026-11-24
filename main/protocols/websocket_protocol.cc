@@ -190,7 +190,8 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     // The server establishes Gemini Live before receiving the device hello.
     // Supply a cached snapshot on the handshake shared by conversation and
     // standalone speech; never make a network request on this transport path.
-    if (stackchan_ws_environment_context) {
+    if (stackchan_ws_environment_context &&
+        !Application::GetInstance().IsSleepTalkAnnouncementPending()) {
         constexpr size_t kContextCapacity = 1200;
         char* encoded_context = static_cast<char*>(heap_caps_calloc(
             kContextCapacity, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));

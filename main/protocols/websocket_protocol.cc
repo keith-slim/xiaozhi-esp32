@@ -191,10 +191,15 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     // Supply a cached snapshot on the handshake shared by conversation and
     // standalone speech; never make a network request on this transport path.
     if (stackchan_ws_environment_context) {
-        char encoded_context[1200]{};
-        if (stackchan_ws_environment_context(encoded_context, sizeof(encoded_context))) {
-            websocket_->SetHeader("X-StackChan-Environment", encoded_context);
-            ESP_LOGI(TAG, "[ENV] context header attached");
+        constexpr size_t kContextCapacity = 1200;
+        char* encoded_context = static_cast<char*>(heap_caps_calloc(
+            kContextCapacity, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (encoded_context) {
+            if (stackchan_ws_environment_context(encoded_context, kContextCapacity)) {
+                websocket_->SetHeader("X-StackChan-Environment", encoded_context);
+                ESP_LOGI(TAG, "[ENV] context header attached");
+            }
+            heap_caps_free(encoded_context);
         }
     }
     // Context is evaluated afresh for every WebSocket connection (normal

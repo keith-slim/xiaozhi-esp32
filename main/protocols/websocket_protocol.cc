@@ -2,6 +2,9 @@
 #include "application.h"
 #include "board.h"
 #include "settings.h"
+#if CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+#include "audio/conversation_audio_settings.h"
+#endif
 #include "system_info.h"
 
 #include <esp_log.h>
@@ -187,6 +190,11 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     websocket_->SetHeader("Protocol-Version", std::to_string(version_).c_str());
     websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
     websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+#if CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+    const int vad = ConversationAudio::Get().vad_mode;
+    websocket_->SetHeader("X-StackChan-VAD", vad == 0 ? "low" : vad == 2 ? "high" : "default");
+    ESP_LOGI(TAG, "[CONV_AUDIO] Gemini VAD requested=%d", vad);
+#endif
     // The server establishes Gemini Live before receiving the device hello.
     // Supply a cached snapshot on the handshake shared by conversation and
     // standalone speech; never make a network request on this transport path.

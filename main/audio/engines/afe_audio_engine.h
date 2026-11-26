@@ -90,6 +90,11 @@ private:
     std::string last_detected_wake_word_;
     std::vector<int16_t> input_buffer_;
     std::vector<int16_t> output_buffer_;
+    // Owned by the same output-producing task as output_buffer_.
+    int conversation_settings_ = -1;
+    float conversation_manual_gain_ = 1.0f;
+    float conversation_agc_gain_ = 1.0f;
+    float conversation_agc_limit_ = 1.0f;
     std::mutex input_buffer_mutex_;
 
     std::function<void(const std::string&)> wake_word_detected_callback_;
@@ -110,6 +115,7 @@ private:
     void ApplyAfeControls();
     void ApplyWakeNetThreshold();
     void ApplyPendingReset();
+    void AppendConversationAudio(const int16_t* data, size_t samples, size_t stride);
     void OutputRawAudio(const std::vector<int16_t>& data);
     void HandleWakeWordResult(const afe_fetch_result_t* result);
     void HandleVoiceResult(const afe_fetch_result_t* result);

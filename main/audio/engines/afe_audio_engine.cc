@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include <string_view>
 #include <vector>
@@ -13,6 +14,7 @@
 
 #include "audio_service.h"
 #include "wake_net_threshold.h"
+#include "conversation_audio_settings.h"
 #include <nvs.h>
 #include "wake_words/custom_wake_word.h"
 
@@ -60,6 +62,47 @@ bool Save(int value) {
 }
 } // namespace WakeNetThreshold
 
+namespace ConversationAudio {
+namespace {
+constexpr char kNamespace[] = "audio";
+constexpr char kKey[] = "conv_input";
+std::atomic<int> desired{-1};
+}
+
+Settings Get() {
+    int value = desired.load();
+    if (value >= 0) return Unpack(value);
+    int32_t stored = Pack(Settings{});
+    nvs_handle_t handle;
+    if (nvs_open(kNamespace, NVS_READONLY, &handle) == ESP_OK) {
+        if (nvs_get_i32(handle, kKey, &stored) != ESP_OK) stored = Pack(Settings{});
+        nvs_close(handle);
+    }
+    const Settings decoded = Unpack(stored);
+    value = stored >= 0 && Valid(decoded) && Pack(decoded) == stored
+        ? stored : Pack(Settings{});
+    int uninitialized = -1;
+    if (!desired.compare_exchange_strong(uninitialized, value)) value = uninitialized;
+    return Unpack(value);
+}
+
+bool Save(const Settings& value) {
+    if (!Valid(value)) return false;
+    const int packed = Pack(value);
+    if (Pack(Get()) == packed) return true;
+    nvs_handle_t handle;
+    if (nvs_open(kNamespace, NVS_READWRITE, &handle) != ESP_OK) return false;
+    esp_err_t err = nvs_set_i32(handle, kKey, packed);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK) return false;
+    desired.store(packed);
+    if (stackchan_nvs_commit_observer) stackchan_nvs_commit_observer();
+    return true;
+}
+
+} // namespace ConversationAudio
+
 #if CONFIG_USE_AUDIO_PROCESSOR
 static constexpr bool kUseAfeForVoiceProcessing = true;
 #else
@@ -105,6 +148,8 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
     }
 
     codec_ = codec;
+    // Load NVS before starting either real-time audio task.
+    ConversationAudio::Get();
     frame_samples_ = frame_duration_ms * 16000 / 1000;
     output_buffer_.reserve(frame_samples_);
 
@@ -631,9 +676,57 @@ void AfeAudioEngine::HandleWakeWordResult(const afe_fetch_result_t* result) {
     }
 }
 
+// Only the output sent to the conversation/Opus encoder is adjusted.
+// WakeNet/MultiNet, microphone DOA, the AEC reference, and the shared
+// AFE's internal AGC pipeline are untouched. No additional frame buffers.
+void AfeAudioEngine::AppendConversationAudio(const int16_t* data, size_t samples, size_t stride) {
+    if (!data || samples == 0 || stride == 0) return;
+    const auto settings = ConversationAudio::Get();
+    const int packed = ConversationAudio::Pack(settings);
+    if (packed != conversation_settings_) {
+        conversation_settings_ = packed;
+        conversation_manual_gain_ = std::pow(10.0f, settings.gain_db / 20.0f);
+        conversation_agc_limit_ = std::pow(10.0f, settings.agc * 3.0f / 20.0f);
+        conversation_agc_gain_ = 1.0f;
+        ESP_LOGI(TAG, "[CONV_AUDIO] gain_db=%d agc=%d gemini_vad_requested=%d",
+                 settings.gain_db, settings.agc, settings.vad_mode);
+    }
+    if (settings.gain_db == 0 && settings.agc == 0) {
+        // Exact original PCM path for default settings.
+        if (stride == 1) output_buffer_.insert(output_buffer_.end(), data, data + samples);
+        else for (size_t i = 0; i < samples; ++i) output_buffer_.push_back(data[i * stride]);
+        return;
+    }
+
+    float gain = conversation_manual_gain_;
+    if (settings.agc != 0) {
+        uint64_t sum = 0;
+        int peak = 0;
+        for (size_t i = 0; i < samples; ++i) {
+            const int sample = data[i * stride];
+            sum += static_cast<uint64_t>(sample * sample);
+            peak = std::max(peak, sample < 0 ? -sample : sample);
+        }
+        const float rms = std::sqrt(static_cast<float>(sum) / samples) * gain;
+        // Do not raise near-silent input; cap the extra gain to the selected
+        // strength. Faster attack for loud sounds, slower gain recovery.
+        const float target = rms >= 128.0f
+            ? std::clamp(4096.0f / rms, 1.0f, conversation_agc_limit_) : 1.0f;
+        conversation_agc_gain_ += (target - conversation_agc_gain_) *
+            (target < conversation_agc_gain_ ? 0.5f : 0.1f);
+        gain *= conversation_agc_gain_;
+        if (peak > 0) gain = std::min(gain, 32767.0f / peak);
+    }
+    for (size_t i = 0; i < samples; ++i) {
+        const float scaled = data[i * stride] * gain;
+        output_buffer_.push_back(static_cast<int16_t>(std::clamp(scaled, -32768.0f, 32767.0f)));
+    }
+}
+
 void AfeAudioEngine::HandleVoiceResult(const afe_fetch_result_t* result) {
     if (output_reset_pending_.exchange(false)) {
         output_buffer_.clear();
+        conversation_settings_ = -1;
     }
     if (vad_state_change_callback_) {
         if (result->vad_state == VAD_SPEECH && !is_speaking_) {
@@ -649,7 +742,7 @@ void AfeAudioEngine::HandleVoiceResult(const afe_fetch_result_t* result) {
     }
 
     size_t samples = result->data_size / sizeof(int16_t);
-    output_buffer_.insert(output_buffer_.end(), result->data, result->data + samples);
+    AppendConversationAudio(result->data, samples, 1);
     while (output_buffer_.size() >= static_cast<size_t>(frame_samples_)) {
         if (output_buffer_.size() == static_cast<size_t>(frame_samples_)) {
             output_callback_(std::move(output_buffer_));
@@ -669,15 +762,10 @@ void AfeAudioEngine::OutputRawAudio(const std::vector<int16_t>& data) {
     }
     if (output_reset_pending_.exchange(false)) {
         output_buffer_.clear();
+        conversation_settings_ = -1;
     }
-    const size_t channels = codec_->input_channels();
-    if (channels <= 1) {
-        output_buffer_.insert(output_buffer_.end(), data.begin(), data.end());
-    } else {
-        for (size_t i = 0; i < data.size(); i += channels) {
-            output_buffer_.push_back(data[i]);
-        }
-    }
+    const size_t channels = std::max(codec_->input_channels(), 1);
+    AppendConversationAudio(data.data(), data.size() / channels, channels);
     while (output_buffer_.size() >= static_cast<size_t>(frame_samples_)) {
         output_callback_(
             std::vector<int16_t>(output_buffer_.begin(), output_buffer_.begin() + frame_samples_));

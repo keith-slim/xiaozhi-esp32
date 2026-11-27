@@ -51,7 +51,7 @@ class Application {
     // and its origin. No separate startup lifecycle/lock is required.
     enum class AnnouncementKind : uint8_t {
         None, Touch, Test, Startup, Morning, Bedtime, WakeWord, Timer, Snore, SleepTalk,
-        DreamRemark, Monologue, MonologueTest, LowBattery
+        DreamRemark, Monologue, MonologueTest, LowBattery, DrowsyReply, ConversationRemark, InterruptReply
     };
 
 public:
@@ -153,6 +153,7 @@ public:
     // Match S3: dream speech does not need real-world clock or weather facts.
     bool IsSleepTalkAnnouncementPending() const { return announcement_kind_.load() == AnnouncementKind::SleepTalk; }
     bool IsAnnouncementActive() const { return announcement_kind_.load() != AnnouncementKind::None; }
+    bool IsWakeWordHandoffPending() const { return wake_word_handoff_pending_.load(); }
     bool IsStartupAnnouncementActive() const { return announcement_kind_.load() == AnnouncementKind::Startup; }
 
     
@@ -196,8 +197,9 @@ private:
     bool announcement_subtitles_linger_ = false; // main task only
     std::function<std::string()> wake_word_announcement_provider_;
     std::string wake_word_after_announcement_; // Main-task only, resumed after socket close.
-    bool wake_word_handoff_pending_ = false; // An empty recognized word must still resume listening.
-    std::string pending_wake_word_greeting_; // Used when wake word interrupts snore/sleep talk.
+    std::atomic<bool> wake_word_handoff_pending_{false}; // Also observed by the perception worker.
+    std::string pending_wake_word_greeting_; // Used when wake word interrupts standalone speech.
+    const char* pending_wake_word_greeting_kind_ = "wake_word";
     int64_t pending_wake_word_since_us_ = 0; // Bounded fallback if the greeting cannot start.
 
     NotifyPlayer notify_player_;

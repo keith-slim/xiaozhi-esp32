@@ -19,6 +19,7 @@
 
 #include <driver/gpio.h>
 #include <esp_log.h>
+#include <esp_random.h>
 #include <esp_heap_caps.h>
 #include <arpa/inet.h>
 #include <cJSON.h>
@@ -348,15 +349,15 @@ void Application::Run() {
             display->UpdateStatusBar();
             TryStartLocalNetworkService();
             MaybeReconnectAudioChannel();
-            // A wake word can interrupt a sleep sound already playing through
+            // A wake word can interrupt standalone speech already playing through
             // the single audio decoder. Cancel and fully close that socket
             // BEFORE starting the wake-word greeting on a new Live turn.
             if (!pending_wake_word_greeting_.empty()) {
                 if (!IsAnnouncementActive() && GetDeviceState() == kDeviceStateIdle &&
                     (!protocol_ || !protocol_->IsAudioChannelOpened()) &&
                     audio_service_.IsPlaybackIdle() &&
-                    RequestAnnouncement("wake_word", pending_wake_word_greeting_.c_str())) {
-                    ESP_LOGI(TAG, "[SPEECH] kind=wake_word phase=queued_after_sleep_sound");
+                    RequestAnnouncement(pending_wake_word_greeting_kind_, pending_wake_word_greeting_.c_str())) {
+                    ESP_LOGI(TAG, "[SPEECH] kind=%s phase=queued_after_interruption", pending_wake_word_greeting_kind_);
                     pending_wake_word_greeting_.clear();
                     pending_wake_word_since_us_ = 0;
                 } else if (pending_wake_word_since_us_ &&
@@ -377,9 +378,9 @@ void Application::Run() {
                     audio_service_.IsPlaybackIdle()) {
                     std::string word = std::move(wake_word_after_announcement_);
                     wake_word_after_announcement_.clear();
-                    wake_word_handoff_pending_ = false;
                     ESP_LOGI(TAG, "[SPEECH] kind=wake_word phase=handoff_to_listening");
                     BeginWakeWordInvoke(word);
+                    wake_word_handoff_pending_ = false;
                 } else if (GetDeviceState() == kDeviceStateListening ||
                            GetDeviceState() == kDeviceStateSpeaking) {
                     // User initiated another dialogue; do not replay the
@@ -1160,6 +1161,20 @@ void Application::HandleWakeWordDetectedEvent() {
     Board::GetInstance().OnWakeWordDetected();
 
     const auto active_kind = announcement_kind_.load();
+    const bool interrupting_monologue = active_kind == AnnouncementKind::Monologue ||
+        active_kind == AnnouncementKind::ConversationRemark;
+    if (interrupting_monologue || active_kind == AnnouncementKind::DrowsyReply) {
+        pending_wake_word_greeting_kind_ = "interrupt_reply";
+        pending_wake_word_greeting_ = interrupting_monologue && state == kDeviceStateSpeaking
+            ? (esp_random() % 8 == 0 ? "あ、いや、なんでもない。" : "あ、ごめん。なになに？") : "";
+        pending_wake_word_since_us_ = pending_wake_word_greeting_.empty() ? 0 : esp_timer_get_time();
+        wake_word_after_announcement_ = wake_word;
+        wake_word_handoff_pending_ = true;
+        if (protocol_->IsAudioChannelOpened()) protocol_->SendAbortSpeaking(kAbortReasonWakeWordDetected);
+        audio_service_.ResetDecoder();
+        FinishAnnouncement("canceled_wake_word");
+        return;
+    }
     const bool sleep_sound_connection =
         (state == kDeviceStateConnecting || state == kDeviceStateSpeaking) &&
         (active_kind == AnnouncementKind::Snore || active_kind == AnnouncementKind::SleepTalk);
@@ -1170,6 +1185,7 @@ void Application::HandleWakeWordDetectedEvent() {
         const std::string greeting = wake_word_announcement_provider_
             ? wake_word_announcement_provider_() : std::string{};
         pending_wake_word_greeting_ = greeting;
+        pending_wake_word_greeting_kind_ = "wake_word";
         pending_wake_word_since_us_ = greeting.empty() ? 0 : esp_timer_get_time();
         wake_word_after_announcement_ = wake_word;
         wake_word_handoff_pending_ = true;
@@ -1569,6 +1585,9 @@ const char* Application::AnnouncementTag(AnnouncementKind kind) {
     case AnnouncementKind::Monologue:
     case AnnouncementKind::MonologueTest: return "monologue";
     case AnnouncementKind::LowBattery: return "low_battery";
+    case AnnouncementKind::DrowsyReply: return "drowsy_reply";
+    case AnnouncementKind::ConversationRemark: return "conversation_remark";
+    case AnnouncementKind::InterruptReply: return "interrupt_reply";
     default: return "none";
     }
 }
@@ -1644,6 +1663,9 @@ bool Application::RequestAnnouncement(const char* kind, const char* text, bool m
     else if (std::strcmp(kind, "snore") == 0) requested = AnnouncementKind::Snore;
     else if (std::strcmp(kind, "sleep_talk") == 0) requested = AnnouncementKind::SleepTalk;
     else if (std::strcmp(kind, "dream_remark") == 0) requested = AnnouncementKind::DreamRemark;
+    else if (std::strcmp(kind, "drowsy_reply") == 0) requested = AnnouncementKind::DrowsyReply;
+    else if (std::strcmp(kind, "conversation_remark") == 0) requested = AnnouncementKind::ConversationRemark;
+    else if (std::strcmp(kind, "interrupt_reply") == 0) requested = AnnouncementKind::InterruptReply;
     else if (std::strcmp(kind, "monologue") == 0) requested = manual ? AnnouncementKind::MonologueTest : AnnouncementKind::Monologue;
     else return false;
 
@@ -1725,6 +1747,7 @@ uint8_t Application::ActiveSleepAnnouncement() const {
 bool Application::IsQuietBackground(AnnouncementKind kind) {
     return kind == AnnouncementKind::Snore || kind == AnnouncementKind::SleepTalk ||
            kind == AnnouncementKind::DreamRemark || kind == AnnouncementKind::Monologue ||
+           kind == AnnouncementKind::ConversationRemark || kind == AnnouncementKind::DrowsyReply ||
            kind == AnnouncementKind::Timer;
 }
 

@@ -142,6 +142,7 @@ void McpServer::AddUserOnlyTools() {
                         return true;
                     });
 
+#if !CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
     // Firmware upgrade
     AddUserOnlyTool(
         "self.upgrade_firmware",
@@ -163,6 +164,8 @@ void McpServer::AddUserOnlyTools() {
 
             return true;
         });
+
+#endif
 
     // Display control
 #ifdef HAVE_LVGL

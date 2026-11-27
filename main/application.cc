@@ -1815,6 +1815,12 @@ void Application::Reboot() {
 }
 
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
+#if CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+    (void)url;
+    (void)version;
+    ESP_LOGW(TAG, "Firmware download is disabled on StackChan");
+    return false;
+#else
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
 
@@ -1871,6 +1877,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
         Reboot();
         return true;
     }
+#endif
 }
 
 void Application::WakeWordInvoke(const std::string& wake_word) {

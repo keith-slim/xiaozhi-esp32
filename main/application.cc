@@ -12,6 +12,10 @@
 #include "system_info.h"
 #include "text_glyph_payload.h"
 #include "websocket_protocol.h"
+#include <esp_app_desc.h>
+#if CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+#include <stackchan/config/server_boot_policy.h>
+#endif
 
 #include <driver/gpio.h>
 #include <esp_log.h>
@@ -504,7 +508,7 @@ void Application::HandleActivationDoneEvent() {
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
 
-    has_server_time_ = ota_->HasServerTime();
+    has_server_time_ = ota_ && ota_->HasServerTime();
 
     // Protocol start may have already raised MAIN_EVENT_ERROR. Do not replace
     // that alert with the "ready" UI/sound — the main loop can process both
@@ -516,7 +520,8 @@ void Application::HandleActivationDoneEvent() {
     }
     if (!has_error) {
         auto display = Board::GetInstance().GetDisplay();
-        std::string message = std::string(Lang::Strings::VERSION) + ota_->GetCurrentVersion();
+        const std::string version = ota_ ? ota_->GetCurrentVersion() : esp_app_get_description()->version;
+        std::string message = std::string(Lang::Strings::VERSION) + version;
         display->ShowNotification(message.c_str());
         display->SetChatMessage("system", "");
     }
@@ -536,20 +541,33 @@ void Application::HandleActivationDoneEvent() {
 }
 
 void Application::ActivationTask() {
-    // Create OTA object for activation process
-    ota_ = std::make_unique<Ota>();
-
-    // Apply installed assets; do not fetch or install automatic updates.
+    // Apply installed assets independently of provisioning.
     CheckAssetsVersion();
 
-    // The self-hosted OTA endpoint is still needed to provision the WebSocket
-    // URL and activation data, but firmware updates are never automatic.
-    CheckNewVersion();
+    bool direct = false;
+    bool use_mqtt = false;
+#if CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+    using stackchan::config::server_boot::Protocol;
+    const auto stored = stackchan::config::server_boot::ReadDirectProtocol();
+    if (stored != Protocol::Legacy) {
+        direct = true;
+        use_mqtt = stored == Protocol::Mqtt;
+        ESP_LOGI(TAG, "Starting directly from stored %s configuration", use_mqtt ? "MQTT" : "WebSocket");
+        // OTA no longer supplies the clock. Existing SNTP/RTC sync remains.
+        GetHAL().startSntp();
+    }
+#endif
+    if (!direct) {
+        // Transitional fallback until independent Wi-Fi/server setup is ready.
+        ota_ = std::make_unique<Ota>();
+        CheckNewVersion();
+        use_mqtt = ota_->HasMqttConfig() || !ota_->HasWebsocketConfig();
+        if (!ota_->HasMqttConfig() && !ota_->HasWebsocketConfig()) {
+            ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
+        }
+    }
 
-    // Initialize the protocol
-    InitializeProtocol();
-
-    // Signal completion to main loop
+    InitializeProtocol(use_mqtt);
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
 }
 
@@ -673,7 +691,7 @@ void Application::CheckNewVersion() {
     }
 }
 
-void Application::InitializeProtocol() {
+void Application::InitializeProtocol(bool use_mqtt) {
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
     auto codec = board.GetAudioCodec();
@@ -682,14 +700,11 @@ void Application::InitializeProtocol() {
 
     is_websocket_protocol_ = false;
     auto_reconnect_pending_ = false;
-    if (ota_->HasMqttConfig()) {
+    if (use_mqtt) {
         protocol_ = std::make_unique<MqttProtocol>();
-    } else if (ota_->HasWebsocketConfig()) {
+    } else {
         protocol_ = std::make_unique<WebsocketProtocol>();
         is_websocket_protocol_ = true;
-    } else {
-        ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
-        protocol_ = std::make_unique<MqttProtocol>();
     }
 
     if (is_websocket_protocol_) {

@@ -258,7 +258,7 @@ private:
     // Helper methods
     void CheckAssetsVersion();
     void CheckNewVersion();
-    void InitializeProtocol();
+    void InitializeProtocol(bool use_mqtt);
     void SetListeningMode(ListeningMode mode);
     ListeningMode GetDefaultListeningMode() const;
     

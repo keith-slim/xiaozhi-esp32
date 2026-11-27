@@ -51,7 +51,7 @@ class Application {
     // and its origin. No separate startup lifecycle/lock is required.
     enum class AnnouncementKind : uint8_t {
         None, Touch, Test, Startup, Morning, Bedtime, WakeWord, Timer, Snore, SleepTalk,
-        DreamRemark, Monologue, MonologueTest
+        DreamRemark, Monologue, MonologueTest, LowBattery
     };
 
 public:
@@ -137,6 +137,9 @@ public:
     // Opt-in text-only speech using the existing Xiaozhi WebSocket/decoder.
     // Nonblocking: no network work under the StackChan LVGL lock.
     bool RequestAnnouncement(const char* kind, const char* text, bool manual = false);
+    // StackChan-only shutdown scene admission. No other board enables it.
+    bool SetLowBatteryMode(bool active);
+    bool IsLowBatteryMode() const { return low_battery_mode_.load(); }
     // End only the current conversation at its playback boundary, and stop
     // autonomous speech without interrupting manual tests or greetings.
     void QuietModeStarted(bool voice_command = false);
@@ -186,6 +189,8 @@ private:
     std::deque<std::unique_ptr<AudioStreamPacket>> pending_tts_audio_;
     bool tts_start_pending_ = false;
     std::atomic<AnnouncementKind> announcement_kind_{AnnouncementKind::None};
+    std::atomic<bool> low_battery_mode_{false};
+    std::atomic<bool> low_battery_prepared_{false};
     int64_t announcement_started_us_ = 0; // main task only, bounded timeout
     bool announcement_subtitles_linger_ = false; // main task only
     std::function<std::string()> wake_word_announcement_provider_;

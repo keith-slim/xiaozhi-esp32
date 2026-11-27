@@ -468,6 +468,7 @@ void Application::HandleNetworkDisconnectedEvent() {
 }
 
 void Application::MaybeReconnectAudioChannel() {
+    if (low_battery_mode_.load()) return;
     if (!auto_reconnect_pending_ || !is_websocket_protocol_ || !protocol_ ||
         wake_word_handoff_pending_ || IsAnnouncementActive() ||
         GetDeviceState() != kDeviceStateIdle || esp_timer_get_time() < auto_reconnect_due_us_) {
@@ -1001,6 +1002,7 @@ void Application::StartListening() { xEventGroupSetBits(event_group_, MAIN_EVENT
 void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING); }
 
 void Application::HandleToggleChatEvent() {
+    if (low_battery_mode_.load()) return;
     auto state = GetDeviceState();
 
     if (state == kDeviceStateNotifying) {
@@ -1043,6 +1045,7 @@ void Application::HandleToggleChatEvent() {
 }
 
 void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+    if (low_battery_mode_.load()) return;
     // Check state again in case it was changed during scheduling
     if (GetDeviceState() != kDeviceStateConnecting) {
         return;
@@ -1067,6 +1070,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 }
 
 void Application::HandleStartListeningEvent() {
+    if (low_battery_mode_.load()) return;
     auto state = GetDeviceState();
 
     if (state == kDeviceStateNotifying) {
@@ -1120,6 +1124,7 @@ void Application::HandleStopListeningEvent() {
 }
 
 void Application::HandleWakeWordDetectedEvent() {
+    if (low_battery_mode_.load()) return;
     if (!protocol_) {
         return;
     }
@@ -1191,6 +1196,7 @@ void Application::HandleWakeWordDetectedEvent() {
 }
 
 void Application::BeginWakeWordInvoke(const std::string& wake_word) {
+    if (low_battery_mode_.load()) return;
     // Must run in the main task with the device in idle state.
     // The encoder's PSRAM task stack (24 KiB for WakeNet) is only needed
     // when the captured wake-word audio is actually sent to the server.
@@ -1219,6 +1225,7 @@ void Application::BeginWakeWordInvoke(const std::string& wake_word) {
 }
 
 void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
+    if (low_battery_mode_.load()) return;
     // Check state again in case it was changed during scheduling
     if (GetDeviceState() != kDeviceStateConnecting) {
         return;
@@ -1284,7 +1291,7 @@ void Application::HandleStateChangedEvent() {
                     "neutral");  // Then set emotion (wechat mode checks child count)
             }
             audio_service_.EnableVoiceProcessing(false);
-            audio_service_.EnableWakeWordDetection(true);
+            audio_service_.EnableWakeWordDetection(!low_battery_mode_.load());
             break;
         case kDeviceStateConnecting:
             announcement_subtitles_linger_ = false;
@@ -1317,14 +1324,14 @@ void Application::HandleStateChangedEvent() {
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
                 // Only AFE wake word can be detected in speaking mode
-                audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+                audio_service_.EnableWakeWordDetection(!low_battery_mode_.load() && audio_service_.IsAfeWakeWord());
             }
             audio_service_.ResetDecoder();
             break;
         case kDeviceStateNotifying:
             display->SetStatus(Lang::Strings::SPEAKING);
             audio_service_.EnableVoiceProcessing(false);
-            audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+            audio_service_.EnableWakeWordDetection(!low_battery_mode_.load() && audio_service_.IsAfeWakeWord());
             break;
         case kDeviceStateWifiConfiguring:
             audio_service_.EnableVoiceProcessing(false);
@@ -1450,7 +1457,7 @@ void Application::StartListeningAudio() {
 void Application::ConfigureWakeWordForListening() {
 #ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
     // Enable wake word detection in listening mode (configured via Kconfig)
-    audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+    audio_service_.EnableWakeWordDetection(!low_battery_mode_.load() && audio_service_.IsAfeWakeWord());
 #else
     // Disable wake word detection in listening mode
     audio_service_.EnableWakeWordDetection(false);
@@ -1466,7 +1473,7 @@ void Application::StartNotification(std::string audio_url, std::vector<NotifySub
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
     audio_service_.EnableVoiceProcessing(false);
-    audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+    audio_service_.EnableWakeWordDetection(!low_battery_mode_.load() && audio_service_.IsAfeWakeWord());
     audio_service_.ReleaseWakeWordResources();
     while (audio_service_.PopPacketFromSendQueue()) {
         // Discard microphone audio left over from a previous conversation.
@@ -1538,8 +1545,54 @@ const char* Application::AnnouncementTag(AnnouncementKind kind) {
     case AnnouncementKind::DreamRemark: return "dream_remark";
     case AnnouncementKind::Monologue:
     case AnnouncementKind::MonologueTest: return "monologue";
+    case AnnouncementKind::LowBattery: return "low_battery";
     default: return "none";
     }
+}
+
+bool Application::SetLowBatteryMode(bool active) {
+    if (low_battery_mode_.exchange(active) == active) return true;
+    low_battery_prepared_.store(false);
+    if (!Schedule([this, active]() {
+        if (low_battery_mode_.load() != active) return;
+        if (active) {
+            auto_reconnect_pending_ = false;
+            wake_word_handoff_pending_ = false;
+            pending_wake_word_greeting_.clear();
+            wake_word_after_announcement_.clear();
+            pending_listening_start_ = false;
+            audio_service_.EnableWakeWordDetection(false);
+            const auto state = GetDeviceState();
+            if (IsAnnouncementActive()) {
+                if (protocol_ && protocol_->IsAudioChannelOpened())
+                    protocol_->SendAbortSpeaking(kAbortReasonNone);
+                audio_service_.ResetDecoder();
+                FinishAnnouncement("canceled_low_battery");
+            } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening ||
+                       state == kDeviceStateConnecting) {
+                if (protocol_ && protocol_->IsAudioChannelOpened())
+                    protocol_->SendAbortSpeaking(kAbortReasonNone);
+                audio_service_.ResetDecoder();
+                CloseQuietConversation();
+            } else if (state == kDeviceStateNotifying) {
+                StopNotification();
+            }
+            low_battery_prepared_.store(true);
+        } else {
+            if (announcement_kind_.load() == AnnouncementKind::LowBattery) {
+                if (protocol_ && protocol_->IsAudioChannelOpened())
+                    protocol_->SendAbortSpeaking(kAbortReasonNone);
+                audio_service_.ResetDecoder();
+                FinishAnnouncement("canceled_external_power");
+            }
+            if (GetDeviceState() == kDeviceStateIdle)
+                audio_service_.EnableWakeWordDetection(true);
+        }
+    })) {
+        low_battery_mode_.store(!active);
+        return false;
+    }
+    return true;
 }
 
 bool Application::RequestAnnouncement(const char* kind, const char* text, bool manual) {
@@ -1553,8 +1606,12 @@ bool Application::RequestAnnouncement(const char* kind, const char* text, bool m
         return false;
     }
 
+    const bool low_battery = std::strcmp(kind, "low_battery") == 0;
+    if (low_battery_mode_.load() != low_battery ||
+        (low_battery && !low_battery_prepared_.load())) return false;
     AnnouncementKind requested = AnnouncementKind::None;
-    if (std::strcmp(kind, "touch") == 0) requested = AnnouncementKind::Touch;
+    if (low_battery) requested = AnnouncementKind::LowBattery;
+    else if (std::strcmp(kind, "touch") == 0) requested = AnnouncementKind::Touch;
     else if (std::strcmp(kind, "test") == 0) requested = AnnouncementKind::Test;
     else if (std::strcmp(kind, "startup") == 0) requested = AnnouncementKind::Startup;
     else if (std::strcmp(kind, "morning") == 0) requested = AnnouncementKind::Morning;
@@ -1572,8 +1629,12 @@ bool Application::RequestAnnouncement(const char* kind, const char* text, bool m
     if (!announcement_kind_.compare_exchange_strong(expected, requested)) return false;
     ESP_LOGI(TAG, "[SPEECH] kind=%s phase=queued transport=ws12800", kind);
 
-    Schedule([this, kind = std::string(kind), message = std::string(text)]() {
-        if (!IsAnnouncementActive()) return;
+    if (!Schedule([this, requested, kind = std::string(kind), message = std::string(text)]() {
+        if (announcement_kind_.load() != requested) return;
+        if (low_battery_mode_.load() != (requested == AnnouncementKind::LowBattery)) {
+            FinishAnnouncement("canceled_mode_changed");
+            return;
+        }
         if (!protocol_ || !is_websocket_protocol_ || GetDeviceState() != kDeviceStateIdle ||
             !SetDeviceState(kDeviceStateConnecting)) {
             announcement_kind_.store(AnnouncementKind::None);
@@ -1584,8 +1645,13 @@ bool Application::RequestAnnouncement(const char* kind, const char* text, bool m
         // socket, including standalone sleep talk and snoring.
         Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         // Publish CONNECTING before the potentially blocking WebSocket open.
-        Schedule([this, kind, message]() {
-            if (!IsAnnouncementActive() || !protocol_ ||
+        if (!Schedule([this, requested, kind, message]() {
+            if (announcement_kind_.load() != requested) return;
+            if (low_battery_mode_.load() != (requested == AnnouncementKind::LowBattery)) {
+                FinishAnnouncement("canceled_mode_changed");
+                return;
+            }
+            if (!protocol_ ||
                 GetDeviceState() != kDeviceStateConnecting) {
                 announcement_kind_.store(AnnouncementKind::None);
                 return;
@@ -1601,8 +1667,12 @@ bool Application::RequestAnnouncement(const char* kind, const char* text, bool m
             LogMemorySnapshot("announcement_ws_sent");
             ESP_LOGI(TAG, "[SPEECH] kind=%s phase=sent transport=ws12800 session=%s",
                      kind.c_str(), protocol_->session_id().c_str());
-        });
-    });
+        })) FinishAnnouncement("queue_failed");
+    })) {
+        auto expected_kind = requested;
+        announcement_kind_.compare_exchange_strong(expected_kind, AnnouncementKind::None);
+        return false;
+    }
     return true;
 }
 
@@ -1881,6 +1951,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
 }
 
 void Application::WakeWordInvoke(const std::string& wake_word) {
+    if (low_battery_mode_.load()) return;
     if (!protocol_) {
         return;
     }

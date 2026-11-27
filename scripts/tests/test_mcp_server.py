@@ -44,9 +44,11 @@ class McpServerTest(unittest.TestCase):
                         static Application app;
                         return app;
                     }
-                    void Schedule(std::function<void()> fn) {
+                    bool Schedule(std::function<void()> fn) {
                         pending.push_back(std::move(fn));
+                        return true;
                     }
+                    bool IsLowBatteryMode() const { return false; }
                     void Drain() {
                         while (!pending.empty()) {
                             auto tasks = std::move(pending);

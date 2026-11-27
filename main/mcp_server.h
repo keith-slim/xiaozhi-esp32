@@ -423,6 +423,7 @@ public:
 class McpServer {
 public:
     using ResponseSender = std::function<void(const std::string&)>;
+    using ExecutionGuard = std::function<bool()>;
     static McpServer& GetInstance() {
         static McpServer instance;
         return instance;
@@ -440,8 +441,10 @@ public:
                  const PropertyList& properties, ToolCallback callback);
     void AddUserOnlyTool(const std::string& name, const std::string& description,
                          const PropertyList& properties, ToolCallback callback);
-    void ParseMessage(const cJSON* json, ResponseSender response_sender = nullptr);
-    void ParseMessage(const std::string& message, ResponseSender response_sender = nullptr);
+    void ParseMessage(const cJSON* json, ResponseSender response_sender = nullptr,
+                      ExecutionGuard execution_guard = nullptr);
+    void ParseMessage(const std::string& message, ResponseSender response_sender = nullptr,
+                      ExecutionGuard execution_guard = nullptr);
 
 private:
     McpServer();
@@ -458,7 +461,7 @@ private:
     void GetToolsList(int id, const std::string& cursor, bool list_user_only_tools,
                       const ResponseSender& response_sender);
     void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments,
-                    ResponseSender response_sender);
+                    ResponseSender response_sender, ExecutionGuard execution_guard);
 
     std::vector<std::unique_ptr<McpTool>> tools_;
 };

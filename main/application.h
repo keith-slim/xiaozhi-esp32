@@ -190,6 +190,7 @@ private:
     bool tts_start_pending_ = false;
     std::atomic<AnnouncementKind> announcement_kind_{AnnouncementKind::None};
     std::atomic<bool> low_battery_mode_{false};
+    std::atomic<unsigned> remote_mcp_generation_{0}; // current open WebSocket only
     std::atomic<bool> low_battery_prepared_{false};
     int64_t announcement_started_us_ = 0; // main task only, bounded timeout
     bool announcement_subtitles_linger_ = false; // main task only

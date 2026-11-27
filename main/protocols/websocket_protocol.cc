@@ -195,8 +195,8 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
     websocket_->SetHeader("X-StackChan-VAD", vad == 0 ? "low" : vad == 2 ? "high" : "default");
     ESP_LOGI(TAG, "[CONV_AUDIO] Gemini VAD requested=%d", vad);
 #endif
-    // The server establishes Gemini Live before receiving the device hello.
-    // Supply a cached snapshot on the handshake shared by conversation and
+    // Supply cached context before the server discovers MCP tools and opens
+    // Gemini Live. The handshake is shared by conversation and
     // standalone speech; never make a network request on this transport path.
     if (stackchan_ws_environment_context &&
         !Application::GetInstance().IsSleepTalkAnnouncementPending()) {
@@ -292,6 +292,7 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
                     }
                 } else {
                     if (on_incoming_json_ != nullptr) {
+                        callback_generation_.store(generation, std::memory_order_relaxed);
                         on_incoming_json_(root);
                     }
                 }

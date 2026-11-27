@@ -366,13 +366,14 @@ void McpServer::AddUserOnlyTool(const std::string& name, const std::string& desc
     AddTool(std::move(tool));
 }
 
-void McpServer::ParseMessage(const std::string& message, ResponseSender response_sender) {
+void McpServer::ParseMessage(const std::string& message, ResponseSender response_sender,
+                             ExecutionGuard execution_guard) {
     CJsonUniquePtr json(cJSON_Parse(message.c_str()));
     if (json == nullptr) {
         ESP_LOGE(TAG, "Failed to parse MCP message: %s", message.c_str());
         return;
     }
-    ParseMessage(json.get(), std::move(response_sender));
+    ParseMessage(json.get(), std::move(response_sender), std::move(execution_guard));
 }
 
 void McpServer::ParseCapabilities(const cJSON* capabilities) {
@@ -394,7 +395,8 @@ void McpServer::ParseCapabilities(const cJSON* capabilities) {
     }
 }
 
-void McpServer::ParseMessage(const cJSON* json, ResponseSender response_sender) {
+void McpServer::ParseMessage(const cJSON* json, ResponseSender response_sender,
+                             ExecutionGuard execution_guard) {
     // Check JSONRPC version
     auto version = cJSON_GetObjectItem(json, "jsonrpc");
     if (version == nullptr || !cJSON_IsString(version) ||
@@ -476,7 +478,7 @@ void McpServer::ParseMessage(const cJSON* json, ResponseSender response_sender) 
             return;
         }
         DoToolCall(id_int, std::string(tool_name->valuestring), tool_arguments,
-                   std::move(response_sender));
+                   std::move(response_sender), std::move(execution_guard));
     } else {
         ESP_LOGE(TAG, "Method not implemented: %s", method_str.c_str());
         ReplyError(id_int, -32601, "Method not implemented: " + method_str, response_sender);
@@ -588,7 +590,11 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
 }
 
 void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments,
-                           ResponseSender response_sender) {
+                           ResponseSender response_sender, ExecutionGuard execution_guard) {
+    if (Application::GetInstance().IsLowBatteryMode() || (execution_guard && !execution_guard())) {
+        ReplyError(id, -32000, "Device shutting down or MCP connection no longer current", response_sender);
+        return;
+    }
     auto tool_iter = std::find_if(tools_.begin(), tools_.end(), [&tool_name](const auto& tool) {
         return tool->name() == tool_name;
     });
@@ -643,7 +649,12 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
     // Retain the original response route if a camera worker cannot start.
     const auto worker_error_sender = response_sender;
     auto run_tool = [this, id, tool, arguments = std::move(arguments),
-                     response_sender = std::move(response_sender)]() {
+                     response_sender = std::move(response_sender), execution_guard = std::move(execution_guard)]() {
+        // A queued action may outlive the connection or the shutdown scene.
+        if (Application::GetInstance().IsLowBatteryMode() || (execution_guard && !execution_guard())) {
+            ReplyError(id, -32000, "Device shutting down or MCP connection no longer current", response_sender);
+            return;
+        }
         auto result = tool->Call(arguments);
         if (!result) {
             ESP_LOGE(TAG, "tools/call: %s", result.error().c_str());
@@ -677,5 +688,7 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
 #endif
 
     // All other MCP tools keep their original main-thread behaviour.
-    Application::GetInstance().Schedule(std::move(run_tool));
+    if (!Application::GetInstance().Schedule(std::move(run_tool))) {
+        ReplyError(id, -32000, "Device main task queue busy", worker_error_sender);
+    }
 }

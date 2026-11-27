@@ -738,6 +738,7 @@ void Application::InitializeProtocol(bool use_mqtt) {
 
     protocol_->OnAudioChannelOpened([this, codec]() {
         const unsigned generation = protocol_ ? protocol_->callback_generation() : 0;
+        if (is_websocket_protocol_) remote_mcp_generation_.store(generation);
         Schedule([this, codec, generation]() {
             if (!protocol_ || protocol_->connection_generation() != generation) return;
             auto& board = Board::GetInstance();
@@ -760,6 +761,10 @@ void Application::InitializeProtocol(bool use_mqtt) {
 
     protocol_->OnAudioChannelClosed([this]() {
         const unsigned generation = protocol_ ? protocol_->callback_generation() : 0;
+        if (is_websocket_protocol_) {
+            unsigned expected = generation;
+            remote_mcp_generation_.compare_exchange_strong(expected, 0);
+        }
         Schedule([this, generation]() {
             if (protocol_ && protocol_->connection_generation() != generation) {
                 ESP_LOGI(TAG, "Ignoring close callback from websocket generation %u", generation);
@@ -925,7 +930,25 @@ void Application::InitializeProtocol(bool use_mqtt) {
         } else if (strcmp(type->valuestring, "mcp") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
             if (cJSON_IsObject(payload)) {
-                McpServer::GetInstance().ParseMessage(payload);
+                if (is_websocket_protocol_ && protocol_) {
+                    const unsigned generation = protocol_->callback_generation();
+                    // Inventory replies can arrive during the hello handoff;
+                    // send on the main task only if the same socket is open.
+                    auto current = [this, generation]() {
+                        return generation != 0 && remote_mcp_generation_.load() == generation;
+                    };
+                    McpServer::GetInstance().ParseMessage(payload,
+                        [this, generation](const std::string& response) {
+                            Schedule([this, generation, response]() {
+                                if (!protocol_ || protocol_->connection_generation() != generation ||
+                                    !protocol_->IsAudioChannelOpened()) return;
+                                protocol_->SendMcpMessage(response);
+                                if (mcp_broadcast_callback_) mcp_broadcast_callback_(response);
+                            });
+                        }, current);
+                } else {
+                    McpServer::GetInstance().ParseMessage(payload);
+                }
             }
         } else if (strcmp(type->valuestring, "system") == 0) {
             auto command = cJSON_GetObjectItem(root, "command");

@@ -223,6 +223,16 @@ bool WebsocketProtocol::OpenAudioChannelInternal(bool report_errors) {
         if (generation != websocket_generation_.load()) return;
         if (first_frame) {
             first_frame = false;
+#if CONFIG_BOARD_TYPE_M5STACK_STACK_CHAN
+            // The pinned esp-ml307 transport creates tcp_receive at priority 1.
+            // Raise only this board's actual TCP receive task (not modem/other
+            // transports). Match the Opus worker; input and application remain above it.
+            if (std::strcmp(pcTaskGetName(nullptr), "tcp_receive") == 0 &&
+                uxTaskPriorityGet(nullptr) < 5) {
+                vTaskPrioritySet(nullptr, 5);
+                ESP_LOGI(TAG, "[WS_RX_DIAG] tcp_receive priority=5");
+            }
+#endif
             ESP_LOGI(TAG, "[WS_RX_DIAG] first_frame elapsed_ms=%lu bytes=%u binary=%u internal=%u largest=%u",
                      (unsigned long)((esp_timer_get_time() - connection_started_us) / 1000),
                      (unsigned)len, (unsigned)binary,

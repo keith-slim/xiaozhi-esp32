@@ -491,6 +491,7 @@ void AudioService::AudioOutputTask() {
         auto task = std::move(audio_playback_queue_.front());
         audio_playback_queue_.pop_front();
         output_in_flight_ = true;
+        const uint32_t diag_epoch = playback_diag_epoch_;
         audio_queue_cv_.notify_all();
         lock.unlock();
 
@@ -504,7 +505,9 @@ void AudioService::AudioOutputTask() {
             callbacks_.on_playback_progress(task.playback_id, task.media_position_ms);
         }
 
+        const int64_t output_started = esp_timer_get_time();
         codec_->OutputData(task.pcm);
+        const int64_t output_finished = esp_timer_get_time();
 
         // Use the PCM submitted to the speaker as the only subtitle clock.
         // Notifications have a separate non-zero playback_id.
@@ -587,6 +590,16 @@ void AudioService::AudioOutputTask() {
             timestamp_queue_.push_back(task.timestamp);
         }
 #endif
+        if (diag_epoch == playback_diag_epoch_ && task.playback_id == 0) {
+            ++playback_diag_.output;
+            const auto duration = static_cast<uint32_t>(output_finished - output_started);
+            if (duration > playback_diag_.output_max_us) playback_diag_.output_max_us = duration;
+            if (playback_diag_.last_output_us) {
+                const auto gap = static_cast<uint32_t>((output_finished - playback_diag_.last_output_us) / 1000);
+                if (gap > playback_diag_.output_gap_max_ms) playback_diag_.output_gap_max_ms = gap;
+            }
+            playback_diag_.last_output_us = output_finished;
+        }
         output_in_flight_ = false;
         notify_drained = MarkPlaybackDrainedLocked();
         audio_queue_cv_.notify_all();
@@ -623,6 +636,7 @@ void AudioService::OpusCodecTask() {
             audio_decode_queue_.pop_front();
             decode_in_flight_ = true;
             const uint32_t generation = playback_generation_;
+            const uint32_t diag_epoch = playback_diag_epoch_;
             audio_queue_cv_.notify_all();
             lock.unlock();
 
@@ -632,6 +646,7 @@ void AudioService::OpusCodecTask() {
             task.playback_id = packet->playback_id;
             task.media_position_ms = packet->media_position_ms;
 
+            const int64_t decode_started = esp_timer_get_time();
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
             bool decoded = false;
             if (opus_decoder_ != nullptr) {
@@ -674,7 +689,14 @@ void AudioService::OpusCodecTask() {
                 ESP_LOGE(TAG, "Audio decoder is not configured");
             }
 
+            const auto decode_us = static_cast<uint32_t>(esp_timer_get_time() - decode_started);
             lock.lock();
+            if (diag_epoch == playback_diag_epoch_ && packet->playback_id == 0) {
+                if (decode_us > playback_diag_.decode_max_us) playback_diag_.decode_max_us = decode_us;
+                if (!decoded) ++playback_diag_.decode_failed;
+                else if (generation != playback_generation_ || service_stopped_.load()) ++playback_diag_.decode_stale;
+                else ++playback_diag_.decoded;
+            }
             if (decoded && generation == playback_generation_ && !service_stopped_.load()) {
                 audio_playback_queue_.push_back(std::move(task));
             }
@@ -1037,6 +1059,22 @@ bool AudioService::IsIdle() {
 bool AudioService::IsPlaybackIdle() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     return IsPlaybackDrainedLocked();
+}
+
+void AudioService::BeginPlaybackDiagnostics() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    ++playback_diag_epoch_;
+    playback_diag_ = {};
+}
+
+PlaybackDiagnostics AudioService::GetPlaybackDiagnostics() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    auto snapshot = playback_diag_;
+    snapshot.decode_queued = audio_decode_queue_.size();
+    snapshot.pcm_queued = audio_playback_queue_.size();
+    snapshot.decoding = decode_in_flight_;
+    snapshot.outputting = output_in_flight_;
+    return snapshot;
 }
 
 void AudioService::ResetDecoder() {

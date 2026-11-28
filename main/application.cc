@@ -396,6 +396,8 @@ void Application::Run() {
                 FinishAnnouncement("timeout");
             }
 
+            if (GetDeviceState() == kDeviceStateSpeaking) ReportTtsDiagnostics("stall");
+
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
@@ -772,6 +774,7 @@ void Application::InitializeProtocol(bool use_mqtt) {
                 return;
             }
             Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+            ReportTtsDiagnostics("transport_closed", true);
             ClearPendingTtsAudio();
             // Preserve ordering with queued TTS stop/playback events. Clearing
             // the flag on the network callback thread could re-enable listening.
@@ -876,9 +879,11 @@ void Application::InitializeProtocol(bool use_mqtt) {
                     last_speech_subtitle_tick_ms_.store(0);
                     ActivateTtsPlayback();
                 })) {
+                    ReportTtsDiagnostics("schedule_failed", true);
                     ClearPendingTtsAudio();
                 }
             } else if (strcmp(state->valuestring, "stop") == 0) {
+                ReportTtsDiagnostics("tts_stop");
                 Schedule([this]() {
                     if (GetDeviceState() != kDeviceStateSpeaking) return;
                     if (!audio_service_.IsPlaybackIdle()) {
@@ -1723,6 +1728,7 @@ bool Application::RequestAnnouncement(const char* kind, const char* text, bool m
 void Application::FinishAnnouncement(const char* result) {
     const auto completed = announcement_kind_.exchange(AnnouncementKind::None);
     if (completed == AnnouncementKind::None) return;
+    ReportTtsDiagnostics(result, true);
     ESP_LOGI(TAG, "[SPEECH] kind=%s phase=%s transport=ws12800",
              AnnouncementTag(completed),
              std::strcmp(result, "completed") == 0 ? "playback_completed" : result);
@@ -1760,6 +1766,7 @@ void Application::CloseQuietConversation() {
 }
 
 void Application::FinishConversationPlayback() {
+    ReportTtsDiagnostics("playback_drained", true);
     if (quiet_end_pending_) {
         CloseQuietConversation();
     } else {
@@ -1849,35 +1856,64 @@ void Application::ClearLastErrorMessage() {
 }
 
 void Application::PrepareTtsStart() {
+    ReportTtsDiagnostics("replaced", true);
     std::lock_guard<std::mutex> lock(pending_tts_audio_mutex_);
     pending_tts_audio_.clear();
     tts_start_pending_ = true;
+    audio_service_.BeginPlaybackDiagnostics();
+    tts_diag_ = {};
+    tts_diag_.active = true;
+    tts_diag_.started_us = esp_timer_get_time();
 }
 
 void Application::HandleIncomingTtsAudio(std::unique_ptr<AudioStreamPacket> packet) {
     if (!packet) return;
+    const int64_t entered = esp_timer_get_time();
     std::lock_guard<std::mutex> lock(pending_tts_audio_mutex_);
+    const auto lock_us = static_cast<uint32_t>(esp_timer_get_time() - entered);
+    if (tts_diag_.active) {
+        ++tts_diag_.received;
+        if (lock_us > tts_diag_.lock_max_us) tts_diag_.lock_max_us = lock_us;
+        if (tts_diag_.last_rx_us) {
+            const auto gap = static_cast<uint32_t>((entered - tts_diag_.last_rx_us) / 1000);
+            if (gap > tts_diag_.rx_gap_max_ms) tts_diag_.rx_gap_max_ms = gap;
+        }
+        tts_diag_.last_rx_us = entered;
+    }
     if (!tts_start_pending_) {
         if (GetDeviceState() == kDeviceStateSpeaking) {
-            audio_service_.PushPacketToDecodeQueue(std::move(packet));
+            // Never block the shared TCP receive task on a full audio queue.
+            const bool accepted = audio_service_.PushPacketToDecodeQueue(std::move(packet));
+            if (tts_diag_.active) {
+                if (accepted) ++tts_diag_.accepted;
+                else ++tts_diag_.dropped;
+            }
+        } else if (tts_diag_.active) {
+            ++tts_diag_.outside_state;
         }
-        return;
+    } else {
+        static constexpr size_t kMaxPendingTtsPackets = 16;
+        if (pending_tts_audio_.size() >= kMaxPendingTtsPackets) {
+            if (tts_diag_.active) ++tts_diag_.dropped;
+        } else {
+            pending_tts_audio_.push_back(std::move(packet));
+            if (pending_tts_audio_.size() > tts_diag_.pending_peak)
+                tts_diag_.pending_peak = pending_tts_audio_.size();
+        }
     }
-
-    static constexpr size_t kMaxPendingTtsPackets = 16;
-    if (pending_tts_audio_.size() >= kMaxPendingTtsPackets) {
-        ESP_LOGW(TAG, "Pending TTS audio full; dropping packet before speaking state");
-        return;
-    }
-    pending_tts_audio_.push_back(std::move(packet));
+    const auto elapsed = static_cast<uint32_t>(esp_timer_get_time() - entered);
+    if (tts_diag_.active && elapsed > tts_diag_.callback_max_us) tts_diag_.callback_max_us = elapsed;
 }
 
 void Application::ActivateTtsPlayback() {
-    std::lock_guard<std::mutex> lock(pending_tts_audio_mutex_);
+    std::unique_lock<std::mutex> lock(pending_tts_audio_mutex_);
     if (GetDeviceState() != kDeviceStateSpeaking) {
         if (!SetDeviceState(kDeviceStateSpeaking)) {
             tts_start_pending_ = false;
+            tts_diag_.dropped += pending_tts_audio_.size();
             pending_tts_audio_.clear();
+            lock.unlock();
+            ReportTtsDiagnostics("state_rejected", true);
             return;
         }
         // Reset before releasing buffered audio. The deferred state handler
@@ -1886,7 +1922,9 @@ void Application::ActivateTtsPlayback() {
     }
     while (!pending_tts_audio_.empty()) {
         if (!audio_service_.PushPacketToDecodeQueue(std::move(pending_tts_audio_.front()))) {
-            ESP_LOGW(TAG, "Decode queue full while flushing pending TTS audio");
+            if (tts_diag_.active) ++tts_diag_.dropped;
+        } else if (tts_diag_.active) {
+            ++tts_diag_.accepted;
         }
         pending_tts_audio_.pop_front();
     }
@@ -1899,7 +1937,47 @@ void Application::ClearPendingTtsAudio() {
     pending_tts_audio_.clear();
 }
 
+void Application::ReportTtsDiagnostics(const char* phase, bool finish) {
+    TtsDiagnostics rx;
+    PlaybackDiagnostics playback;
+    int64_t now = 0;
+    unsigned pending = 0;
+    {
+        std::lock_guard<std::mutex> lock(pending_tts_audio_mutex_);
+        if (!tts_diag_.active) return;
+        playback = audio_service_.GetPlaybackDiagnostics();
+        now = esp_timer_get_time();
+        pending = pending_tts_audio_.size();
+        if (std::strcmp(phase, "stall") == 0) {
+            const int64_t last = playback.last_output_us ? playback.last_output_us : tts_diag_.started_us;
+            if (now - last < 2000000) {
+                tts_diag_.stall_reported = false;
+                return;
+            }
+            if (tts_diag_.stall_reported) return;
+            tts_diag_.stall_reported = true;
+        }
+        rx = tts_diag_;
+        if (finish) tts_diag_.active = false;
+    }
+    // Two compact lines fit the existing serial/event-log pipeline. No speech text or secrets.
+    ESP_LOGI(TAG, "[TTS_DIAG] phase=%s elapsed=%lu rx=%u accepted=%u drop=%u outside=%u pending=%u/%u rx_idle=%lu gap=%u cb_us=%u lock_us=%u",
+             phase, (unsigned long)((now-rx.started_us)/1000), (unsigned)rx.received,
+             (unsigned)rx.accepted, (unsigned)rx.dropped, (unsigned)rx.outside_state,
+             pending, (unsigned)rx.pending_peak,
+             (unsigned long)((now-(rx.last_rx_us ? rx.last_rx_us : rx.started_us))/1000),
+             (unsigned)rx.rx_gap_max_ms, (unsigned)rx.callback_max_us, (unsigned)rx.lock_max_us);
+    ESP_LOGI(TAG, "[TTS_PCM_DIAG] phase=%s decoded=%u fail=%u stale=%u output=%u idle=%lu decode_us=%u output_us=%u gap=%u dq=%u pq=%u busy=%u/%u",
+             phase, (unsigned)playback.decoded, (unsigned)playback.decode_failed,
+             (unsigned)playback.decode_stale, (unsigned)playback.output,
+             (unsigned long)((now-(playback.last_output_us ? playback.last_output_us : rx.started_us))/1000),
+             (unsigned)playback.decode_max_us, (unsigned)playback.output_max_us,
+             (unsigned)playback.output_gap_max_ms, (unsigned)playback.decode_queued,
+             (unsigned)playback.pcm_queued, (unsigned)playback.decoding, (unsigned)playback.outputting);
+}
+
 void Application::AbortSpeaking(AbortReason reason) {
+    ReportTtsDiagnostics("abort", true);
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
     if (protocol_) {

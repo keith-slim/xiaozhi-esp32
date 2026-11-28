@@ -189,6 +189,13 @@ private:
     std::mutex pending_tts_audio_mutex_;
     std::deque<std::unique_ptr<AudioStreamPacket>> pending_tts_audio_;
     bool tts_start_pending_ = false;
+    // Protected by pending_tts_audio_mutex_; no per-packet allocations or logs.
+    struct TtsDiagnostics {
+        bool active = false, stall_reported = false;
+        int64_t started_us = 0, last_rx_us = 0;
+        uint32_t received = 0, accepted = 0, dropped = 0, outside_state = 0;
+        uint32_t pending_peak = 0, rx_gap_max_ms = 0, callback_max_us = 0, lock_max_us = 0;
+    } tts_diag_;
     std::atomic<AnnouncementKind> announcement_kind_{AnnouncementKind::None};
     std::atomic<bool> low_battery_mode_{false};
     std::atomic<unsigned> remote_mcp_generation_{0}; // current open WebSocket only
@@ -259,6 +266,7 @@ private:
     void HandleIncomingTtsAudio(std::unique_ptr<AudioStreamPacket> packet);
     void ActivateTtsPlayback();
     void ClearPendingTtsAudio();
+    void ReportTtsDiagnostics(const char* phase, bool finish = false);
 
     // Activation task (runs in background)
     void ActivationTask();

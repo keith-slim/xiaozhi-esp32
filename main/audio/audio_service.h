@@ -107,6 +107,15 @@ struct AudioTask {
     uint32_t media_position_ms = 0;
 };
 
+// Bounded scalar diagnostics, independent of audio buffers and playback control.
+struct PlaybackDiagnostics {
+    uint32_t decoded = 0, decode_failed = 0, decode_stale = 0, output = 0;
+    uint32_t decode_max_us = 0, output_max_us = 0, output_gap_max_ms = 0;
+    uint32_t decode_queued = 0, pcm_queued = 0;
+    bool decoding = false, outputting = false;
+    int64_t last_output_us = 0;
+};
+
 struct DebugStatistics {
     uint32_t input_count = 0;
     uint32_t decode_count = 0;
@@ -130,6 +139,8 @@ public:
     bool IsVoiceDetected() const { return voice_detected_; }
     bool IsIdle();
     bool IsPlaybackIdle();
+    void BeginPlaybackDiagnostics();
+    PlaybackDiagnostics GetPlaybackDiagnostics();
     bool IsWakeWordRunning() const {
         return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING;
     }
@@ -199,6 +210,8 @@ private:
     bool output_in_flight_ = false;
     bool playback_drained_notified_ = true;
     uint32_t playback_generation_ = 0;
+    uint32_t playback_diag_epoch_ = 0;
+    PlaybackDiagnostics playback_diag_{};
     std::atomic<uint64_t> speech_output_samples_{0};
     // Only the output task mutates these pause-detection fields. Decoder reset
     // requests a fresh detector state through an atomic generation counter.

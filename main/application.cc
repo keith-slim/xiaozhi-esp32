@@ -1365,7 +1365,6 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(!low_battery_mode_.load() && audio_service_.IsAfeWakeWord());
             }
-            audio_service_.ResetDecoder();
             break;
         case kDeviceStateNotifying:
             display->SetStatus(Lang::Strings::SPEAKING);
@@ -1857,21 +1856,15 @@ void Application::PrepareTtsStart() {
 
 void Application::HandleIncomingTtsAudio(std::unique_ptr<AudioStreamPacket> packet) {
     if (!packet) return;
-    if (GetDeviceState() == kDeviceStateSpeaking) {
-        audio_service_.PushPacketToDecodeQueue(std::move(packet));
+    std::lock_guard<std::mutex> lock(pending_tts_audio_mutex_);
+    if (!tts_start_pending_) {
+        if (GetDeviceState() == kDeviceStateSpeaking) {
+            audio_service_.PushPacketToDecodeQueue(std::move(packet));
+        }
         return;
     }
 
     static constexpr size_t kMaxPendingTtsPackets = 16;
-    std::unique_lock<std::mutex> lock(pending_tts_audio_mutex_);
-    // The state may have changed while this receive callback waited for the
-    // start handler. Recheck it under the same lock used by activation.
-    if (GetDeviceState() == kDeviceStateSpeaking) {
-        lock.unlock();
-        audio_service_.PushPacketToDecodeQueue(std::move(packet));
-        return;
-    }
-    if (!tts_start_pending_) return;
     if (pending_tts_audio_.size() >= kMaxPendingTtsPackets) {
         ESP_LOGW(TAG, "Pending TTS audio full; dropping packet before speaking state");
         return;
@@ -1881,7 +1874,16 @@ void Application::HandleIncomingTtsAudio(std::unique_ptr<AudioStreamPacket> pack
 
 void Application::ActivateTtsPlayback() {
     std::lock_guard<std::mutex> lock(pending_tts_audio_mutex_);
-    SetDeviceState(kDeviceStateSpeaking);
+    if (GetDeviceState() != kDeviceStateSpeaking) {
+        if (!SetDeviceState(kDeviceStateSpeaking)) {
+            tts_start_pending_ = false;
+            pending_tts_audio_.clear();
+            return;
+        }
+        // Reset before releasing buffered audio. The deferred state handler
+        // runs later and would otherwise discard the first packets.
+        audio_service_.ResetDecoder();
+    }
     while (!pending_tts_audio_.empty()) {
         if (!audio_service_.PushPacketToDecodeQueue(std::move(pending_tts_audio_.front()))) {
             ESP_LOGW(TAG, "Decode queue full while flushing pending TTS audio");

@@ -21,6 +21,7 @@
 #include "audio_service.h"
 #include "device_state.h"
 #include "device_state_machine.h"
+#include "conversation_remark_gate.h"
 #include "notify/notify_player.h"
 
 // Main event bits
@@ -153,6 +154,8 @@ public:
     // Match S3: dream speech does not need real-world clock or weather facts.
     bool IsSleepTalkAnnouncementPending() const { return announcement_kind_.load() == AnnouncementKind::SleepTalk; }
     bool IsAnnouncementActive() const { return announcement_kind_.load() != AnnouncementKind::None; }
+    // Consumes the one-shot authorization only when the scheduled remark is due.
+    std::string TakeDueConversationRemark(bool eligible, bool quiet);
     bool IsWakeWordHandoffPending() const { return wake_word_handoff_pending_.load(); }
     bool IsStartupAnnouncementActive() const { return announcement_kind_.load() == AnnouncementKind::Startup; }
 
@@ -186,6 +189,11 @@ private:
     std::atomic<uint32_t> last_speech_subtitle_tick_ms_{0};
     bool quiet_end_pending_ = false; // main task only; current conversation
     bool tts_stop_pending_ = false;  // Stay in speaking state until actual queued PCM drains.
+    unsigned normal_tts_generation_ = 0; // main task; explicit normal TTS start only
+    std::string tts_remark_session_;      // main task; validated stop authorization
+    std::mutex conversation_remark_mutex_;
+    ConversationRemarkGate conversation_remark_;
+    void ClearConversationRemark();
     std::mutex pending_tts_audio_mutex_;
     std::deque<std::unique_ptr<AudioStreamPacket>> pending_tts_audio_;
     bool tts_start_pending_ = false;

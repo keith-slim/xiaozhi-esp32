@@ -84,7 +84,31 @@ bool Application::SetDeviceState(DeviceState state) {
     // enabling the microphone; ordinary conversations retain strict rules.
     const bool standalone_speech =
         state == kDeviceStateSpeaking && IsAnnouncementActive();
-    return state_machine_.TransitionTo(state, standalone_speech);
+    const auto previous = GetDeviceState();
+    const bool announcement = IsAnnouncementActive();
+    if (!state_machine_.TransitionTo(state, standalone_speech)) return false;
+    if (previous != state) {
+        std::lock_guard<std::mutex> lock(conversation_remark_mutex_);
+        if (!announcement && (state == kDeviceStateConnecting ||
+                              (state == kDeviceStateListening && previous == kDeviceStateIdle))) {
+            conversation_remark_.Clear();
+        } else if (state == kDeviceStateIdle) {
+            conversation_remark_.OnIdle(esp_timer_get_time() / 1000, 45000 + esp_random() % 30001);
+        }
+    }
+    return true;
+}
+
+void Application::ClearConversationRemark() {
+    std::lock_guard<std::mutex> lock(conversation_remark_mutex_);
+    conversation_remark_.Clear();
+}
+
+std::string Application::TakeDueConversationRemark(bool eligible, bool quiet) {
+    std::lock_guard<std::mutex> lock(conversation_remark_mutex_);
+    return conversation_remark_.Take(esp_timer_get_time() / 1000,
+        eligible && GetDeviceState() == kDeviceStateIdle && !IsAnnouncementActive() &&
+        !wake_word_handoff_pending_.load(), quiet);
 }
 
 void Application::Initialize() {
@@ -775,6 +799,9 @@ void Application::InitializeProtocol(bool use_mqtt) {
             }
             Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
             ReportTtsDiagnostics("transport_closed", true);
+            normal_tts_generation_ = 0;
+            tts_remark_session_.clear();
+            if (GetDeviceState() == kDeviceStateSpeaking) ClearConversationRemark();
             ClearPendingTtsAudio();
             // Preserve ordering with queued TTS stop/playback events. Clearing
             // the flag on the network callback thread could re-enable listening.
@@ -855,8 +882,29 @@ void Application::InitializeProtocol(bool use_mqtt) {
                          cJSON_IsString(kind) ? kind->valuestring :
                            AnnouncementTag(announcement_kind_.load()),
                          phase, protocol_ ? protocol_->session_id().c_str() : "");
-                if (strcmp(state->valuestring, "error") == 0)
-                    Schedule([this]() { FinishAnnouncement("server_error"); });
+                if (strcmp(state->valuestring, "error") == 0 || strcmp(state->valuestring, "skipped") == 0) {
+                    auto message = cJSON_GetObjectItem(root, "message");
+                    const char* reason = "unknown";
+                    // Only fixed server result codes are recorded, never arbitrary text.
+                    static constexpr const char* known[] = {"no_recent_conversation", "generation_failed",
+                        "no_audio", "unavailable", "announcement busy", "invalid announcement",
+                        "Gemini Live provider required"};
+                    if (cJSON_IsString(message)) {
+                        for (auto code : known)
+                            if (strcmp(message->valuestring, code) == 0) { reason = code; break; }
+                    }
+                    const unsigned generation = protocol_ ? protocol_->callback_generation() : 0;
+                    const auto requested = announcement_kind_.load();
+                    const bool skip = requested == AnnouncementKind::ConversationRemark &&
+                        strcmp(reason, "no_recent_conversation") == 0;
+                    Schedule([this, generation, requested, reason, skip]() {
+                        if (requested == AnnouncementKind::None || announcement_kind_.load() != requested ||
+                            !protocol_ || protocol_->connection_generation() != generation) return;
+                        ESP_LOGI(TAG, "[SPEECH] kind=%s phase=%s reason=%s", AnnouncementTag(requested),
+                                 skip ? "skipped" : "error_detail", reason);
+                        FinishAnnouncement(skip ? "skipped_no_recent_conversation" : "server_error");
+                    });
+                }
             }
         } else if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
@@ -872,8 +920,14 @@ void Application::InitializeProtocol(bool use_mqtt) {
                          kind_tag, state->valuestring);
             }
             if (strcmp(state->valuestring, "start") == 0) {
+                const bool normal = cJSON_IsString(speech_kind) &&
+                    strcmp(speech_kind->valuestring, "conversation") == 0;
+                const unsigned generation = protocol_ ? protocol_->callback_generation() : 0;
                 PrepareTtsStart();
-                if (!Schedule([this]() {
+                if (!Schedule([this, normal, generation]() {
+                    normal_tts_generation_ = normal && !IsAnnouncementActive() && protocol_ &&
+                        protocol_->connection_generation() == generation ? generation : 0;
+                    tts_remark_session_.clear();
                     aborted_ = false;
                     tts_stop_pending_ = false;
                     last_speech_subtitle_tick_ms_.store(0);
@@ -884,8 +938,23 @@ void Application::InitializeProtocol(bool use_mqtt) {
                 }
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 ReportTtsDiagnostics("tts_stop");
-                Schedule([this]() {
+                const auto remark = cJSON_GetObjectItem(root, "remark_session");
+                const bool normal = cJSON_IsString(speech_kind) &&
+                    strcmp(speech_kind->valuestring, "conversation") == 0;
+                const unsigned generation = protocol_ ? protocol_->callback_generation() : 0;
+                std::string authorization;
+                if (normal && cJSON_IsString(remark) && std::strlen(remark->valuestring) == 36)
+                    authorization = remark->valuestring;
+                Schedule([this, generation, authorization = std::move(authorization)]() {
                     if (GetDeviceState() != kDeviceStateSpeaking) return;
+                    tts_remark_session_.clear();
+                    if (!authorization.empty() && !IsAnnouncementActive() && !aborted_ &&
+                        generation != 0 && normal_tts_generation_ == generation && protocol_ &&
+                        protocol_->connection_generation() == generation &&
+                        protocol_->session_id() == authorization) {
+                        tts_remark_session_ = authorization;
+                    }
+                    normal_tts_generation_ = 0;
                     if (!audio_service_.IsPlaybackIdle()) {
                         tts_stop_pending_ = true;
                         ESP_LOGI(TAG, "TTS stop received; awaiting PCM playback drain");
@@ -1157,6 +1226,7 @@ void Application::HandleWakeWordDetectedEvent() {
     if (!protocol_) {
         return;
     }
+    ClearConversationRemark();
 
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
@@ -1728,6 +1798,8 @@ bool Application::RequestAnnouncement(const char* kind, const char* text, bool m
 void Application::FinishAnnouncement(const char* result) {
     const auto completed = announcement_kind_.exchange(AnnouncementKind::None);
     if (completed == AnnouncementKind::None) return;
+    normal_tts_generation_ = 0;
+    tts_remark_session_.clear();
     ReportTtsDiagnostics(result, true);
     ESP_LOGI(TAG, "[SPEECH] kind=%s phase=%s transport=ws12800",
              AnnouncementTag(completed),
@@ -1766,6 +1838,14 @@ void Application::CloseQuietConversation() {
 }
 
 void Application::FinishConversationPlayback() {
+    if (!IsAnnouncementActive() && !aborted_ && !tts_remark_session_.empty() &&
+        audio_service_.GetPlaybackDiagnostics().output > 0) {
+        std::lock_guard<std::mutex> lock(conversation_remark_mutex_);
+        conversation_remark_.ConfirmPlayback(std::move(tts_remark_session_));
+        ESP_LOGI(TAG, "[SPEECH] kind=conversation phase=remark_eligible");
+    }
+    tts_remark_session_.clear();
+    normal_tts_generation_ = 0;
     ReportTtsDiagnostics("playback_drained", true);
     if (quiet_end_pending_) {
         CloseQuietConversation();
@@ -1977,6 +2057,9 @@ void Application::ReportTtsDiagnostics(const char* phase, bool finish) {
 }
 
 void Application::AbortSpeaking(AbortReason reason) {
+    normal_tts_generation_ = 0;
+    tts_remark_session_.clear();
+    ClearConversationRemark();
     ReportTtsDiagnostics("abort", true);
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
